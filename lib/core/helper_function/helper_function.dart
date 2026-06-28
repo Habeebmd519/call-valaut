@@ -20,13 +20,17 @@ Future<void> openAutoStartSettings() async {
 }
 
 class NativeService {
-  static const MethodChannel _channel = MethodChannel("callvault/service");
+  static const channel = MethodChannel("callvault/service");
 
-  static Future<void> start() async {
-    await _channel.invokeMethod("startService");
+  static Future<String?> findRecordingFolder() async {
+    return await channel.invokeMethod<String>("findRecordingFolder");
+  }
+
+  static Future<void> start(String watchPath) async {
+    await channel.invokeMethod("startService", {"watchPath": watchPath});
   }
 
   static Future<void> stop() async {
-    await _channel.invokeMethod("stopService");
+    await channel.invokeMethod("stopService");
   }
 }

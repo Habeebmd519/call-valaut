@@ -9,7 +9,9 @@ import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
 
-    private val CHANNEL = "callvault/service"
+    companion object {
+        private const val CHANNEL = "callvault/service"
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -21,34 +23,108 @@ class MainActivity : FlutterActivity() {
 
             when (call.method) {
 
+                //-----------------------------------
+                // Find Recording Folder
+                //-----------------------------------
+                "findRecordingFolder" -> {
+
+                    Log.d("CALLVAULT", "Searching recording folder")
+
+                    val folder =
+                        RecordingFolderFinder.find()
+
+                    Log.d(
+                        "CALLVAULT",
+                        "Folder = $folder"
+                    )
+
+                    result.success(folder)
+                }
+
+                //-----------------------------------
+                // Start Service
+                //-----------------------------------
                 "startService" -> {
 
-                    Log.d("CALLVAULT", "Flutter requested Start Service")
+                    val watchPath =
+                        call.argument<String>("watchPath")
 
-                    val intent = Intent(this, CallVaultService::class.java)
+                    if (watchPath == null) {
+
+                        result.error(
+                            "NO_PATH",
+                            "Recording folder not found.",
+                            null
+                        )
+
+                        return@setMethodCallHandler
+                    }
+
+                    Log.d(
+                        "CALLVAULT",
+                        "Flutter requested Start Service"
+                    )
+
+                    Log.d(
+                        "CALLVAULT",
+                        "WatchPath = $watchPath"
+                    )
+
+                    val intent =
+                        Intent(this, CallVaultService::class.java)
+
+                    intent.putExtra(
+                        "watchPath",
+                        watchPath
+                    )
 
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        Log.d("CALLVAULT", "Starting Foreground Service")
+
+                        Log.d(
+                            "CALLVAULT",
+                            "Starting Foreground Service"
+                        )
+
                         startForegroundService(intent)
+
                     } else {
-                        Log.d("CALLVAULT", "Starting Normal Service")
+
+                        Log.d(
+                            "CALLVAULT",
+                            "Starting Normal Service"
+                        )
+
                         startService(intent)
                     }
 
                     result.success(true)
                 }
 
+                //-----------------------------------
+                // Stop Service
+                //-----------------------------------
                 "stopService" -> {
 
-                    Log.d("CALLVAULT", "Stopping Service")
+                    Log.d(
+                        "CALLVAULT",
+                        "Stopping Service"
+                    )
 
-                    val intent = Intent(this, CallVaultService::class.java)
-                    stopService(intent)
+                    stopService(
+                        Intent(
+                            this,
+                            CallVaultService::class.java
+                        )
+                    )
 
                     result.success(true)
                 }
 
-                else -> result.notImplemented()
+                //-----------------------------------
+                else -> {
+
+                    result.notImplemented()
+                }
             }
         }
     }

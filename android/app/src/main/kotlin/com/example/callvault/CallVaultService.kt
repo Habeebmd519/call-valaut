@@ -4,25 +4,39 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.Intent
 import android.os.Build
 import android.os.FileObserver
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class CallVaultService : Service() {
 
-    private val CHANNEL_ID = "callvault_channel"
+    companion object {
+        private const val TAG = "CALLVAULT"
+        private const val CHANNEL_ID = "callvault_channel"
+    }
 
-    private val watchPath =
-        "/storage/emulated/0/Recordings/sound_recorder/call_rec"
+    private lateinit var watchPath: String
+
+   
 
     private lateinit var observer: FileObserver
+
+    private val handler = Handler(Looper.getMainLooper())
 
     override fun onCreate() {
         super.onCreate()
 
-        Log.d("CALLVAULT", "Service Created")
+        log("====================================")
+        log("Service Created")
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
 
@@ -32,98 +46,139 @@ class CallVaultService : Service() {
                 NotificationManager.IMPORTANCE_LOW
             )
 
-            val manager =
-                getSystemService(NotificationManager::class.java)
-
-            manager.createNotificationChannel(channel)
+            getSystemService(NotificationManager::class.java)
+                .createNotificationChannel(channel)
         }
     }
 
     override fun onStartCommand(
-        intent: android.content.Intent?,
-        flags: Int,
-        startId: Int
-    ): Int {
+    intent: Intent?,
+    flags: Int,
+    startId: Int
+): Int {
 
-        Log.d("CALLVAULT", "Service Started")
-
-        val notification: Notification =
-            NotificationCompat.Builder(this, CHANNEL_ID)
-                .setContentTitle("CallVault")
-                .setContentText("Monitoring recordings...")
-                .setSmallIcon(android.R.drawable.ic_menu_info_details)
-                .setOngoing(true)
-                .build()
-
-        startForeground(1, notification)
-
-        Log.d("CALLVAULT", "Foreground Started")
-
-        startWatching()
-
-        return START_STICKY
+    watchPath = intent?.getStringExtra("watchPath") ?: run {
+        log("No watch path received.")
+        stopSelf()
+        return START_NOT_STICKY
     }
 
+    log("Service Started")
+    log("Watch Path = $watchPath")
+
+    val notification =
+        NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("CallVault")
+            .setContentText("Monitoring call recordings...")
+            .setSmallIcon(android.R.drawable.ic_menu_info_details)
+            .setOngoing(true)
+            .build()
+
+    startForeground(1, notification)
+
+    log("Foreground Started")
+
+    startWatching()
+
+    return START_STICKY
+}
     private fun startWatching() {
 
-        Log.d("CALLVAULT", "Watching folder:")
-        Log.d("CALLVAULT", watchPath)
+        val folder = File(watchPath)
+
+        log("------------------------------------")
+        log("Watching Folder")
+        log(watchPath)
+        log("Folder Exists = ${folder.exists()}")
+
+        if (!folder.exists()) {
+            log("Folder does NOT exist")
+            return
+        }
+
+        val files = folder.listFiles()
+
+        log("Existing Files = ${files?.size ?: 0}")
+
+        files?.forEach {
+            log("Existing -> ${it.name}")
+        }
+
+        if (::observer.isInitialized) {
+            observer.stopWatching()
+        }
 
         observer = object : FileObserver(
             watchPath,
-            CREATE or CLOSE_WRITE
+            ALL_EVENTS
         ) {
 
-            override fun onEvent(event: Int, path: String?) {
+            override fun onEvent(
+                event: Int,
+                path: String?
+            ) {
 
                 if (path == null) return
 
-                when (event) {
+                val fullPath = "$watchPath/$path"
+
+                log("------------------------------------")
+                log("EVENT = $event")
+                log("PATH = $path")
+
+                when (event and ALL_EVENTS) {
 
                     CREATE -> {
 
-                        Log.d(
-                            "CALLVAULT",
-                            "=================================="
-                        )
+                        log("CREATE")
+                        log(fullPath)
+                    }
 
-                        Log.d(
-                            "CALLVAULT",
-                            "NEW FILE CREATED"
-                        )
+                    MODIFY -> {
 
-                        Log.d(
-                            "CALLVAULT",
-                            path
-                        )
+                        log("MODIFY")
+                        log(fullPath)
+                    }
 
-                        Log.d(
-                            "CALLVAULT",
-                            "=================================="
-                        )
+                    MOVED_TO -> {
+
+                        log("MOVED_TO")
+                        log(fullPath)
+                    }
+
+                    DELETE -> {
+
+                        log("DELETE")
+                        log(fullPath)
                     }
 
                     CLOSE_WRITE -> {
 
-                        Log.d(
-                            "CALLVAULT",
-                            "=================================="
-                        )
+                        log("CLOSE_WRITE")
+                        log(fullPath)
 
-                        Log.d(
-                            "CALLVAULT",
-                            "RECORDING FINISHED"
-                        )
+                        handler.postDelayed({
 
-                        Log.d(
-                            "CALLVAULT",
-                            path
-                        )
+                            val recording = File(fullPath)
 
-                        Log.d(
-                            "CALLVAULT",
-                            "=================================="
-                        )
+                            log("Exists = ${recording.exists()}")
+
+                            if (!recording.exists()) {
+                                log("Recording not found")
+                                return@postDelayed
+                            }
+
+                            log("================================")
+                            log("Recording Completed")
+                            log("Name = ${recording.name}")
+                            log("Path = ${recording.absolutePath}")
+                            log("Size = ${recording.length()} bytes")
+
+                           log("Recording detected: ${recording.absolutePath}")
+
+                            log("================================")
+
+                        }, 3000)
                     }
                 }
             }
@@ -131,26 +186,45 @@ class CallVaultService : Service() {
 
         observer.startWatching()
 
-        Log.d(
-            "CALLVAULT",
-            "FileObserver Started Successfully"
-        )
+        log("FileObserver Started")
     }
 
     override fun onDestroy() {
 
-        Log.d("CALLVAULT", "Stopping FileObserver")
+        log("Service Destroyed")
 
         if (::observer.isInitialized) {
             observer.stopWatching()
         }
 
-        Log.d("CALLVAULT", "Service Destroyed")
+        handler.removeCallbacksAndMessages(null)
 
         super.onDestroy()
     }
 
-    override fun onBind(intent: android.content.Intent?): IBinder? {
-        return null
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    private fun log(message: String) {
+
+        Log.d(TAG, message)
+
+        try {
+
+            val file =
+                File("/storage/emulated/0/Download/callvault_log.txt")
+
+            if (!file.exists()) {
+                file.createNewFile()
+            }
+
+            val time = SimpleDateFormat(
+                "HH:mm:ss",
+                Locale.getDefault()
+            ).format(Date())
+
+            file.appendText("$time   $message\n")
+
+        } catch (_: Exception) {
+        }
     }
 }
