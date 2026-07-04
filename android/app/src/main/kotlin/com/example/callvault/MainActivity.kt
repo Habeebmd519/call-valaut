@@ -26,20 +26,32 @@ class MainActivity : FlutterActivity() {
                 //-----------------------------------
                 // Find Recording Folder
                 //-----------------------------------
-                "findRecordingFolder" -> {
+//                 "findRecordingFolder" -> {
 
-                    Log.d("CALLVAULT", "Searching recording folder")
+//                     Log.d("CALLVAULT", "Searching recording folder")
 
-                    val folder =
-                        RecordingFolderFinder.find()
+                  
 
-                    Log.d(
-                        "CALLVAULT",
-                        "Folder = $folder"
-                    )
+//                     Log.d(
+//                         "CALLVAULT",
+//                         "Folder = $folder"
+//                     )
+//  Thread {
 
-                    result.success(folder)
-                }
+//         val folder = RecordingFolderFinder.find()
+
+//         runOnUiThread {
+
+//             result.success(folder)
+
+//         }
+
+//     }.start()
+//     Log.d(
+//                         "CALLVAULT",
+//                         "Folder = $folder"
+//                     )
+//                 }
 
                 //-----------------------------------
                 // Start Service

@@ -158,4 +158,48 @@ object RecordingStore {
             jsonArray.toString(4)
         )
     }
+    fun isUploaded(
+    jsonFile: File,
+    filePath: String
+): Boolean {
+
+    if (!jsonFile.exists()) return false
+
+    val array = JSONArray(jsonFile.readText())
+
+    for (i in 0 until array.length()) {
+
+        val obj = array.getJSONObject(i)
+
+        if (obj.getString("filePath") == filePath) {
+            return obj.optBoolean("uploaded", false)
+        }
+    }
+
+    return false
+}
+
+fun markUploaded(
+    jsonFile: File,
+    filePath: String
+) {
+
+    if (!jsonFile.exists()) return
+
+    val array = JSONArray(jsonFile.readText())
+
+    for (i in 0 until array.length()) {
+
+        val obj = array.getJSONObject(i)
+
+        if (obj.getString("filePath") == filePath) {
+
+            obj.put("uploaded", true)
+
+            break
+        }
+    }
+
+    jsonFile.writeText(array.toString(4))
+}
 }

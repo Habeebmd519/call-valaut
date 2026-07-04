@@ -1,7 +1,64 @@
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
-class HomePage extends StatelessWidget {
+class HomePage extends StatefulWidget {
   const HomePage({super.key});
+
+  @override
+  State<HomePage> createState() => _HomePageState();
+}
+
+class _HomePageState extends State<HomePage> {
+  Future<void> saveServerUrl(String url) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString("server_url", url);
+  }
+
+  Future<String> getServerUrl() async {
+    final prefs = await SharedPreferences.getInstance();
+
+    return prefs.getString("server_url") ??
+        "https://n8n-642200590.kloudbeansite.com/webhook/call-upload";
+  }
+
+  Future<void> _showServerDialog() async {
+    final controller = TextEditingController(text: await getServerUrl());
+
+    if (!mounted) return;
+
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text("Server URL"),
+        content: TextField(
+          controller: controller,
+          decoration: const InputDecoration(
+            hintText: "https://your-server/webhook",
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text("Cancel"),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              await saveServerUrl(controller.text.trim());
+
+              if (mounted) {
+                Navigator.pop(context);
+
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text("Server URL updated")),
+                );
+              }
+            },
+            child: const Text("Save"),
+          ),
+        ],
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -206,6 +263,11 @@ class HomePage extends StatelessWidget {
 
           const SizedBox(height: 30),
         ],
+      ),
+      floatingActionButton: FloatingActionButton(
+        backgroundColor: Colors.black,
+        child: const Icon(Icons.settings),
+        onPressed: _showServerDialog,
       ),
     );
   }

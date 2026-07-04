@@ -16,6 +16,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.Collections
 
 class CallVaultService : Service() {
 
@@ -25,8 +26,26 @@ class CallVaultService : Service() {
     }
 
     private lateinit var watchPath: String
+    
 
-   
+    // JSON stored in app storage
+    private val jsonFile by lazy {
+        File(filesDir, "callvault_recordings.json")
+    }
+
+
+private val processedFiles =
+    Collections.synchronizedSet(mutableSetOf<String>())
+
+private val allowedExtensions = setOf(
+    "mp3",
+    "m4a",
+    "aac",
+    "wav",
+    "amr",
+    "3gp",
+    "ogg"
+)
 
     private lateinit var observer: FileObserver
 
@@ -52,142 +71,213 @@ class CallVaultService : Service() {
     }
 
     override fun onStartCommand(
-    intent: Intent?,
-    flags: Int,
-    startId: Int
-): Int {
+        intent: Intent?,
+        flags: Int,
+        startId: Int
+    ): Int {
 
-    watchPath = intent?.getStringExtra("watchPath") ?: run {
-        log("No watch path received.")
-        stopSelf()
-        return START_NOT_STICKY
+        watchPath = intent?.getStringExtra("watchPath") ?: run {
+
+            log("No watch path received.")
+            stopSelf()
+
+            return START_NOT_STICKY
+        }
+
+log("Service Started")
+        log("Watch Path = $watchPath")
+
+        val notification: Notification =
+            NotificationCompat.Builder(this, CHANNEL_ID)
+                .setContentTitle("CallVault")
+                .setContentText("Monitoring call recordings...")
+                .setSmallIcon(android.R.drawable.ic_menu_info_details)
+                .setOngoing(true)
+                .build()
+
+        startForeground(1, notification)
+
+        log("Foreground Started")
+
+        startWatching()
+
+        return START_STICKY
     }
 
-    log("Service Started")
-    log("Watch Path = $watchPath")
-
-    val notification =
-        NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("CallVault")
-            .setContentText("Monitoring call recordings...")
-            .setSmallIcon(android.R.drawable.ic_menu_info_details)
-            .setOngoing(true)
-            .build()
-
-    startForeground(1, notification)
-
-    log("Foreground Started")
-
-    startWatching()
-
-    return START_STICKY
-}
     private fun startWatching() {
 
         val folder = File(watchPath)
 
         log("------------------------------------")
         log("Watching Folder")
-        log(watchPath)
+        log(folder.absolutePath)
         log("Folder Exists = ${folder.exists()}")
 
         if (!folder.exists()) {
+
             log("Folder does NOT exist")
+
             return
         }
 
-        val files = folder.listFiles()
+       val existing = folder.listFiles() ?: emptyArray()
 
-        log("Existing Files = ${files?.size ?: 0}")
+log("Existing Files = ${existing.size}")
 
-        files?.forEach {
-            log("Existing -> ${it.name}")
-        }
+existing.forEach {
+    if (it.isFile) {
+        processedFiles.add(it.absolutePath)
+        log("Ignoring existing -> ${it.name}")
+    }
+}
 
         if (::observer.isInitialized) {
             observer.stopWatching()
         }
 
         observer = object : FileObserver(
-            watchPath,
-            ALL_EVENTS
-        ) {
+    watchPath,
+    CREATE or CLOSE_WRITE or MOVED_TO
+) {
 
-            override fun onEvent(
-                event: Int,
-                path: String?
-            ) {
+    override fun onEvent(event: Int, path: String?) {
 
-                if (path == null) return
+        if (path == null) return
 
-                val fullPath = "$watchPath/$path"
+        val fullPath = "$watchPath/$path"
 
+        when (event and ALL_EVENTS) {
+
+            CREATE -> {
                 log("------------------------------------")
-                log("EVENT = $event")
-                log("PATH = $path")
-
-                when (event and ALL_EVENTS) {
-
-                    CREATE -> {
-
-                        log("CREATE")
-                        log(fullPath)
-                    }
-
-                    MODIFY -> {
-
-                        log("MODIFY")
-                        log(fullPath)
-                    }
-
-                    MOVED_TO -> {
-
-                        log("MOVED_TO")
-                        log(fullPath)
-                    }
-
-                    DELETE -> {
-
-                        log("DELETE")
-                        log(fullPath)
-                    }
-
-                    CLOSE_WRITE -> {
-
-                        log("CLOSE_WRITE")
-                        log(fullPath)
-
-                        handler.postDelayed({
-
-                            val recording = File(fullPath)
-
-                            log("Exists = ${recording.exists()}")
-
-                            if (!recording.exists()) {
-                                log("Recording not found")
-                                return@postDelayed
-                            }
-
-                            log("================================")
-                            log("Recording Completed")
-                            log("Name = ${recording.name}")
-                            log("Path = ${recording.absolutePath}")
-                            log("Size = ${recording.length()} bytes")
-
-                           log("Recording detected: ${recording.absolutePath}")
-
-                            log("================================")
-
-                        }, 3000)
-                    }
-                }
+                log("CREATE")
+                log(fullPath)
             }
+
+            MOVED_TO -> {
+                log("------------------------------------")
+                log("MOVED_TO")
+                log(fullPath)
+            }
+
+            CLOSE_WRITE -> {
+
+    log("------------------------------------")
+    log("CLOSE_WRITE")
+    log(fullPath)
+
+    if (processedFiles.contains(fullPath)) {
+        log("Already processed")
+        return
+    }
+
+    processedFiles.add(fullPath)
+
+    handler.postDelayed({
+
+        Thread {
+            processRecording(fullPath)
+        }.start()
+
+    }, 3000)
+}
         }
+    }
+}
+
 
         observer.startWatching()
 
         log("FileObserver Started")
     }
+
+private fun processRecording(fullPath: String) {
+
+    val recording = File(fullPath)
+
+    if (!recording.exists()) {
+
+        log("Recording not found")
+
+        processedFiles.remove(fullPath)
+
+        return
+    }
+
+    val extension =
+        recording.extension.lowercase()
+
+    if (extension !in allowedExtensions) {
+
+    log("Ignored non-audio file")
+
+    processedFiles.remove(fullPath)
+
+    return
+}
+
+    var stable = false
+
+for (i in 0 until 5) {
+
+    val before = recording.length()
+
+    Thread.sleep(1000)
+
+    val after = recording.length()
+
+    if (before == after) {
+        stable = true
+        break
+    }
+}
+
+if (!stable) {
+    log("Recording still growing")
+    processedFiles.remove(fullPath)
+    return
+}
+
+    log("====================================")
+    log("Recording Completed")
+    log("Name : ${recording.name}")
+    log("Path : ${recording.absolutePath}")
+    log("Size : ${recording.length()} bytes")
+
+    try {
+
+    RecordingStore.saveRecording(
+        jsonFile,
+        recording
+    )
+
+    log("Saved metadata")
+    if (RecordingStore.isUploaded(jsonFile, recording.absolutePath)) {
+    log("Already uploaded")
+    processedFiles.remove(fullPath)
+    return
+}
+   
+
+    UploadManager.upload(
+    this,
+    recording,
+    jsonFile
+)
+
+    log("UploadManager finished")
+
+    processedFiles.remove(fullPath)
+
+} catch (e: Exception) {
+
+    log("UPLOAD ERROR")
+    log(e.stackTraceToString())
+
+    processedFiles.remove(fullPath)
+}
+    log("====================================")
+}
 
     override fun onDestroy() {
 
@@ -206,25 +296,27 @@ class CallVaultService : Service() {
 
     private fun log(message: String) {
 
-        Log.d(TAG, message)
+    Log.d(TAG, message)
 
-        try {
+    try {
 
-            val file =
-                File("/storage/emulated/0/Download/callvault_log.txt")
+        val file = File(
+            getExternalFilesDir(null),
+            "callvault_log.txt"
+        )
 
-            if (!file.exists()) {
-                file.createNewFile()
-            }
-
-            val time = SimpleDateFormat(
-                "HH:mm:ss",
-                Locale.getDefault()
-            ).format(Date())
-
-            file.appendText("$time   $message\n")
-
-        } catch (_: Exception) {
+        if (!file.exists()) {
+            file.createNewFile()
         }
+
+        val time = SimpleDateFormat(
+            "yyyy-MM-dd HH:mm:ss",
+            Locale.getDefault()
+        ).format(Date())
+
+        file.appendText("$time | $message\n")
+
+    } catch (_: Exception) {
     }
+}
 }
