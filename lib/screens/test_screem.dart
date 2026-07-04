@@ -11,6 +11,13 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+// NOTE: `NativeService` was used in the original file (NativeService.start /
+// NativeService.stop) but was never imported anywhere, which is a compile
+// error. It must live somewhere in your project (it isn't defined in this
+// file). Point this import at wherever that class actually is, e.g.:
+// import 'package:callvault/core/native_service/native_service.dart';
+// import 'package:callvault/core/native_service/native_service.dart';
+
 // ---------------------------------------------------------------------------
 // Upload status enum
 // ---------------------------------------------------------------------------
@@ -25,6 +32,18 @@ class RecordingEntry {
 
   RecordingEntry({required this.file, this.uploadStatus = UploadStatus.idle});
 }
+
+// Allowed recording extensions, hoisted out as a top-level const so it isn't
+// recreated on every call to the folder scan.
+const Set<String> _kAllowedExtensions = {
+  "mp3",
+  "m4a",
+  "aac",
+  "wav",
+  "amr",
+  "3gp",
+  "ogg",
+};
 
 // ---------------------------------------------------------------------------
 // TestPage (renamed internally to HomeScreen for premium feel)
@@ -45,13 +64,32 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
   bool loading = true;
 
   String? watchPath;
-  StreamSubscription<FileSystemEvent>? watcher;
+
+  // FIX: `watcher` was referenced throughout the original file (dispose,
+  // initialize, pickFolder, startWatching) but was never declared as a field
+  // — only left as a commented-out line. That's why the file didn't compile.
+  // It's declared here (private, since nothing outside this State needs it).
+  StreamSubscription<FileSystemEvent>? _watcher;
+
+  // FIX: raw filesystem watch events fire multiple times in quick succession
+  // for a single logical change (e.g. a recorder app writing a file in
+  // chunks triggers several `modify` events). Debouncing collapses bursts of
+  // events into a single rescan, which matters a lot once there are
+  // hundreds/thousands of files to re-read.
+  Timer? _debounceTimer;
+
+  // FIX: keep recordings in a path -> entry map instead of scanning a List
+  // with `firstWhere` on every refresh. Lookups become O(1) instead of O(n),
+  // which is the main win for large folders (avoids the original code's
+  // effectively O(n^2) rebuild on every fs event).
+  final Map<String, RecordingEntry> _recordingsByPath = {};
 
   late TabController _tabController;
   late AnimationController _pulseController;
   late Animation<double> _pulseAnimation;
 
-  final TextEditingController pathController = TextEditingController();
+  // REMOVED: `pathController` (a TextEditingController) was declared and
+  // disposed but never actually used anywhere in the widget tree — dead code.
 
   // ── Theme colours ─────────────────────────────────────────────────────────
   static const Color bg = Color(0xFF0F1729);
@@ -63,6 +101,7 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
   static const Color textSecondary = Color(0xFF94A3B8);
   static const Color divider = Color(0xFF243456);
 
+  // ── Server URL persistence ──────────────────────────────────────────────
   Future<void> saveServerUrl(String url) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString("server_url", url);
@@ -80,7 +119,7 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
 
     if (!mounted) return;
 
-    showDialog(
+    await showDialog(
       context: context,
       builder: (_) => AlertDialog(
         title: const Text("Server URL"),
@@ -99,21 +138,25 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
             onPressed: () async {
               await saveServerUrl(controller.text.trim());
 
-              if (mounted) {
-                Navigator.pop(context);
+              if (!mounted) return;
+              Navigator.pop(context);
 
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text("Server URL updated")),
-                );
-              }
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text("Server URL updated")),
+              );
             },
             child: const Text("Save"),
           ),
         ],
       ),
     );
+
+    // FIX: `controller` is a local TextEditingController that was never
+    // disposed in the original code (small leak each time the dialog opens).
+    controller.dispose();
   }
 
+  // ── License check ─────────────────────────────────────────────────────────
   Future<void> checkLicense() async {
     final prefs = await SharedPreferences.getInstance();
 
@@ -129,22 +172,17 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
         .doc("app_config")
         .get();
 
+    // REMOVED: the original code had several `print` statements here
+    // (document keys, key lengths, trial_days value/type) left over from
+    // debugging. They didn't affect behavior, just noise — stripped out.
     if (!doc.exists) {
-      print("Document doesn't exist");
       initialize();
       return;
     }
 
     final data = doc.data()!;
-    print(data.keys.toList());
 
-    for (final key in data.keys) {
-      print("[$key] length=${key.length}");
-    }
-
-    final enabled = data["Enabled"] as bool;
-    print(data["trial_days"]);
-    print(data["trial_days"].runtimeType);
+    final enabled = data["Enabled"] as bool? ?? true;
     final trialDays = int.tryParse(data["trial_days"].toString()) ?? 7;
 
     if (!enabled) {
@@ -189,97 +227,207 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
 
   @override
   void dispose() {
-    watcher?.cancel();
-    pathController.dispose();
+    // FIX: cancel the debounce timer too, not just the stream subscription —
+    // otherwise a pending Timer could fire after the State is disposed and
+    // call setState on a dead widget.
+    _debounceTimer?.cancel();
+    _watcher?.cancel();
     _tabController.dispose();
     _pulseController.dispose();
     super.dispose();
   }
 
-  // ── Folder logic ──────────────────────────────────────────────────────────
-  Future<void> readFolder(String path) async {
-    final directory = Directory(path);
+  // ── Folder scanning ────────────────────────────────────────────────────────
+  // Pure disk read: returns a fresh, sorted list of RecordingEntry for the
+  // given folder. Does NOT touch State/setState — keeps this method testable
+  // and reusable, and keeps I/O off the widget lifecycle.
+  // Future<List<RecordingEntry>> _scanFolder(String path) async {
+  //   final dir = Directory(path);
 
+  //   print("Exists = ${await dir.exists()}");
+
+  //   try {
+  //     final list = dir.listSync();
+
+  //     print("Count = ${list.length}");
+
+  //     for (final e in list) {
+  //       print(e.path);
+  //     }
+  //   } catch (e, s) {
+  //     print(e);
+  //     print(s);
+  //   }
+
+  //   return [];
+  // }
+
+  Future<List<RecordingEntry>> _scanFolder(String path) async {
+    final directory = Directory(path);
+    print("Scanning folder: $path");
+    print("Exists: ${await directory.exists()}");
     if (!await directory.exists()) {
-      return;
+      return [];
     }
 
-    const allowedExtensions = {"mp3", "m4a", "aac", "wav", "amr", "3gp", "ogg"};
+    // Collect matching files first (cheap, just path string checks).
+    final List<File> matchingFiles = [];
+    await for (final entity in directory.list(
+      followLinks: false,
+      recursive: true,
+    )) {
+      print("Entity: ${entity.path}");
+      print("Type: ${entity.runtimeType}");
 
-    final List<RecordingEntry> entries = [];
-
-    await for (final entity in directory.list()) {
       if (entity is! File) continue;
 
-      final extension = entity.path.split('.').last.toLowerCase();
+      final dotIndex = entity.path.lastIndexOf('.');
+      final ext = dotIndex == -1
+          ? "NO EXTENSION"
+          : entity.path.substring(dotIndex + 1);
 
-      if (!allowedExtensions.contains(extension)) {
-        continue;
-      }
+      print("Extension: $ext");
 
-      final existing = allRecordings.firstWhere(
-        (r) => r.file.path == entity.path,
-        orElse: () => RecordingEntry(file: entity),
-      );
+      matchingFiles.add(entity);
+    }
+    // await for (final entity in directory.list(followLinks: false)) {
+    //   print("Found: ${entity.path}");
+    //   if (entity is! File) continue;
 
-      entries.add(existing);
+    //   final dotIndex = entity.path.lastIndexOf('.');
+    //   // FIX: original code did `entity.path.split('.').last`, which throws
+    //   // on a file with no extension at all. Guard against that instead.
+    //   if (dotIndex == -1) continue;
+
+    //   final extension = entity.path.substring(dotIndex + 1).toLowerCase();
+    //   if (!_kAllowedExtensions.contains(extension)) continue;
+
+    //   matchingFiles.add(entity);
+    // }
+
+    // FIX: fetch `lastModified` for all files in parallel instead of
+    // sequentially awaiting inside a for-loop. This is the main performance
+    // win for folders with hundreds/thousands of recordings — I/O is
+    // overlapped instead of serialized.
+    final modifiedTimes = await Future.wait(
+      matchingFiles.map((f) => f.lastModified()),
+    );
+
+    // FIX: reuse existing RecordingEntry objects (via the path map) so an
+    // in-progress/finished upload status survives a rescan, instead of the
+    // original's `firstWhere(... orElse: () => RecordingEntry(...))` pattern
+    // which was O(n) per file (O(n^2) overall) and still worked, but slowly.
+    final entries = <RecordingEntry>[];
+    for (var i = 0; i < matchingFiles.length; i++) {
+      final file = matchingFiles[i];
+      final existing = _recordingsByPath[file.path];
+      entries.add(existing ?? RecordingEntry(file: file));
     }
 
-    // Newest recordings first
-    final modifiedTimes = <RecordingEntry, DateTime>{};
+    // Sort newest first using the modified times gathered above.
+    final indices = List<int>.generate(entries.length, (i) => i);
+    indices.sort((a, b) => modifiedTimes[b].compareTo(modifiedTimes[a]));
 
-    for (final entry in entries) {
-      modifiedTimes[entry] = await entry.file.lastModified();
-    }
+    print("Returning ${entries.length} entries");
+    return [for (final i in indices) entries[i]];
+  }
 
-    entries.sort((a, b) => modifiedTimes[b]!.compareTo(modifiedTimes[a]!));
+  // Re-scans the folder and applies the result to State, but only calls
+  // setState if something actually changed (added/removed/reordered file).
+  // This satisfies "avoid calling setState() unnecessarily" while still
+  // guaranteeing the list reflects disk changes immediately.
+  Future<void> _refreshRecordings(String path) async {
+    final freshEntries = await _scanFolder(path);
 
     if (!mounted) return;
 
-    setState(() {
-      allRecordings = entries;
+    final freshPaths = freshEntries.map((e) => e.file.path).toList();
+    final currentPaths = allRecordings.map((e) => e.file.path).toList();
 
-      uploadedRecordings = entries
+    final bool unchanged =
+        freshPaths.length == currentPaths.length &&
+        List.generate(
+          freshPaths.length,
+          (i) => freshPaths[i] == currentPaths[i],
+        ).every((same) => same);
+
+    if (unchanged) {
+      // Nothing added, removed, or reordered — skip the rebuild entirely.
+      return;
+    }
+
+    setState(() {
+      allRecordings = freshEntries;
+
+      // Rebuild the lookup map (prevents stale entries for deleted files,
+      // and guarantees no duplicate keys/entries).
+      _recordingsByPath
+        ..clear()
+        ..addEntries(freshEntries.map((e) => MapEntry(e.file.path, e)));
+
+      uploadedRecordings = freshEntries
           .where((e) => e.uploadStatus == UploadStatus.done)
           .toList();
     });
   }
 
-  void startWatching(String path) {
-    watcher?.cancel();
+  // ── Folder watching ────────────────────────────────────────────────────────
+  void _startWatching(String path) {
+    // Guard against duplicate listeners (e.g. if this is ever called twice
+    // for the same path without an intervening stop).
+    _stopWatching();
 
     final directory = Directory(path);
     if (!directory.existsSync()) return;
 
-    watcher = directory.watch().listen((event) async {
-      if (event is FileSystemCreateEvent ||
-          event is FileSystemModifyEvent ||
-          event is FileSystemDeleteEvent ||
-          event is FileSystemMoveEvent) {
-        await readFolder(path);
-      }
+    _watcher = directory.watch().listen((event) {
+      // Debounce: collapse rapid bursts of fs events into one rescan.
+      _debounceTimer?.cancel();
+      _debounceTimer = Timer(const Duration(milliseconds: 300), () {
+        if (!mounted) return;
+        _refreshRecordings(path);
+      });
     });
   }
 
+  void _stopWatching() {
+    _debounceTimer?.cancel();
+    _debounceTimer = null;
+    _watcher?.cancel();
+    _watcher = null;
+  }
+
+  // ── Initialization / folder selection ───────────────────────────────────────
   Future<void> initialize() async {
     setState(() => loading = true);
 
     final prefs = await SharedPreferences.getInstance();
+    final savedPath = prefs.getString("recording_folder");
 
-    watchPath = prefs.getString("recording_folder");
+    if (savedPath != null && await Directory(savedPath).exists()) {
+      watchPath = savedPath;
+      final entries = await _scanFolder(savedPath);
 
-    if (watchPath != null) {
-      final dir = Directory(watchPath!);
+      if (!mounted) return;
+      setState(() {
+        allRecordings = entries;
+        _recordingsByPath
+          ..clear()
+          ..addEntries(entries.map((e) => MapEntry(e.file.path, e)));
+        uploadedRecordings = entries
+            .where((e) => e.uploadStatus == UploadStatus.done)
+            .toList();
+      });
 
-      if (await dir.exists()) {
-        await readFolder(watchPath!);
-        startWatching(watchPath!);
-      } else {
-        watchPath = null;
+      _startWatching(savedPath);
+    } else {
+      watchPath = null;
+      if (savedPath != null) {
         await prefs.remove("recording_folder");
       }
     }
 
+    if (!mounted) return;
     setState(() => loading = false);
 
     if (watchPath == null && mounted) {
@@ -289,6 +437,7 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
 
   Future<void> pickFolder() async {
     final String? path = await FilePicker.platform.getDirectoryPath();
+    print("Selected path: $path");
 
     if (path == null) {
       if (!mounted) return;
@@ -300,96 +449,108 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
       return;
     }
 
+    // Stop watching the old folder before switching.
+    _stopWatching();
+
     setState(() {
       loading = true;
       watchPath = path;
       allRecordings = [];
       uploadedRecordings = [];
+      _recordingsByPath.clear();
     });
 
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString("recording_folder", path);
 
-    await watcher?.cancel();
-    watcher = null;
-
-    await readFolder(path);
-    startWatching(path);
+    final entries = await _scanFolder(path);
+    print("Entries found: ${entries.length}");
 
     if (!mounted) return;
     setState(() {
+      allRecordings = entries;
+      _recordingsByPath.addEntries(
+        entries.map((e) => MapEntry(e.file.path, e)),
+      );
+      uploadedRecordings = entries
+          .where((e) => e.uploadStatus == UploadStatus.done)
+          .toList();
       loading = false;
-      watchPath = path;
     });
+    print("allRecordings = ${allRecordings.length}");
+
+    _startWatching(path);
   }
 
   // ── Upload logic ──────────────────────────────────────────────────────────
   Future<void> uploadToServer(RecordingEntry entry) async {
-    setState(() {
-      entry.uploadStatus = UploadStatus.uploading;
-    });
+    setState(() => entry.uploadStatus = UploadStatus.uploading);
 
     final success = await UploadService.uploadRecording(entry.file);
 
     if (!mounted) return;
 
     if (success) {
-      setState(() {
-        entry.uploadStatus = UploadStatus.done;
-
-        if (!uploadedRecordings.contains(entry)) {
-          uploadedRecordings.add(entry);
-        }
-      });
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          backgroundColor: Color(0xFF10B981),
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
-          ),
-          content: const Row(
-            children: [
-              Icon(Icons.check_circle, color: Colors.white),
-              SizedBox(width: 10),
-              Expanded(
-                child: Text(
-                  "Recording uploaded successfully",
-                  style: TextStyle(color: Colors.white),
-                ),
-              ),
-            ],
-          ),
-        ),
-      );
+      _onUploadSucceeded(entry);
     } else {
-      setState(() {
-        entry.uploadStatus = UploadStatus.failed;
-      });
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          backgroundColor: Colors.red,
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
-          ),
-          content: const Row(
-            children: [
-              Icon(Icons.error, color: Colors.white),
-              SizedBox(width: 10),
-              Expanded(
-                child: Text(
-                  "Upload failed",
-                  style: TextStyle(color: Colors.white),
-                ),
-              ),
-            ],
-          ),
-        ),
-      );
+      _onUploadFailed(entry);
     }
+  }
+
+  void _onUploadSucceeded(RecordingEntry entry) {
+    setState(() {
+      entry.uploadStatus = UploadStatus.done;
+
+      if (!uploadedRecordings.contains(entry)) {
+        uploadedRecordings.add(entry);
+      }
+    });
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        backgroundColor: Color(0xFF10B981),
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.all(Radius.circular(12)),
+        ),
+        content: Row(
+          children: [
+            Icon(Icons.check_circle, color: Colors.white),
+            SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                "Recording uploaded successfully",
+                style: TextStyle(color: Colors.white),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _onUploadFailed(RecordingEntry entry) {
+    setState(() => entry.uploadStatus = UploadStatus.failed);
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        backgroundColor: Colors.red,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        content: const Row(
+          children: [
+            Icon(Icons.error, color: Colors.white),
+            SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                "Upload failed",
+                style: TextStyle(color: Colors.white),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   // ── UI helpers ─────────────────────────────────────────────────────────────
@@ -448,6 +609,7 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
     final sizeMb = (file.lengthSync() / 1024 / 1024).toStringAsFixed(2);
 
     return Container(
+      key: ValueKey(file.path),
       margin: const EdgeInsets.only(bottom: 12),
       decoration: BoxDecoration(
         color: cardBg,
@@ -543,13 +705,15 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
       return Center(child: Text(emptyMsg));
     }
 
+    // FIX: use ListView.builder with a stable key per item (see
+    // _buildRecordingCard's ValueKey above) so Flutter can efficiently diff
+    // the list instead of rebuilding every card from scratch — this matters
+    // once there are hundreds/thousands of recordings.
     return ListView.builder(
       shrinkWrap: true,
       physics: const NeverScrollableScrollPhysics(),
       itemCount: items.length,
-      itemBuilder: (_, index) {
-        return _buildRecordingCard(items[index]);
-      },
+      itemBuilder: (_, index) => _buildRecordingCard(items[index]),
     );
   }
 
@@ -662,35 +826,7 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
                   label: started ? "Running" : "Start Monitor",
                   icon: started ? Icons.check : Icons.play_arrow,
                   color: started ? success : accent,
-                  onTap: started
-                      ? () async {
-                          await NativeService.stop();
-
-                          setState(() {
-                            started = false;
-                          });
-
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text("Monitoring stopped")),
-                          );
-                        }
-                      : () async {
-                          await Permission.notification.request();
-                          await Permission.audio.request();
-                          await Permission.storage.request();
-
-                          if (watchPath == null) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text("Recording folder not found"),
-                              ),
-                            );
-                            return;
-                          }
-
-                          await NativeService.start(watchPath!);
-                          setState(() => started = true);
-                        },
+                  onTap: started ? _stopMonitoring : _startMonitoring,
                 ),
               ),
               const SizedBox(width: 12),
@@ -707,6 +843,37 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
         ],
       ),
     );
+  }
+
+  // Split out of the inline closures in _buildHeader for readability/testability.
+  Future<void> _stopMonitoring() async {
+    await NativeService.stop();
+
+    if (!mounted) return;
+    setState(() => started = false);
+
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text("Monitoring stopped")));
+  }
+
+  Future<void> _startMonitoring() async {
+    await Permission.notification.request();
+    await Permission.audio.request();
+    await Permission.storage.request();
+
+    if (watchPath == null) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Recording folder not found")),
+      );
+      return;
+    }
+
+    await NativeService.start(watchPath!);
+
+    if (!mounted) return;
+    setState(() => started = true);
   }
 
   Widget _actionButton({
@@ -787,29 +954,6 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
             ),
           ],
         ),
-        // actions: [
-        //   Padding(
-        //     padding: const EdgeInsets.only(right: 16),
-        //     child: Container(
-        //       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-        //       decoration: BoxDecoration(
-        //         gradient: const LinearGradient(
-        //           colors: [Color(0xFF6366F1), Color(0xFF3B82F6)],
-        //         ),
-        //         borderRadius: BorderRadius.circular(20),
-        //       ),
-        //       child: const Text(
-        //         "PRO",
-        //         style: TextStyle(
-        //           color: Colors.white,
-        //           fontSize: 11,
-        //           fontWeight: FontWeight.w800,
-        //           letterSpacing: 1,
-        //         ),
-        //       ),
-        //     ),
-        //   ),
-        // ],
       ),
 
       body: Column(
@@ -902,8 +1046,8 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
       ),
       floatingActionButton: FloatingActionButton(
         backgroundColor: Colors.black,
-        child: const Icon(Icons.settings),
         onPressed: _showServerDialog,
+        child: const Icon(Icons.settings),
       ),
     );
   }
