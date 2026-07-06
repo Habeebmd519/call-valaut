@@ -11,8 +11,6 @@ import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:ffmpeg_kit_flutter_new/ffmpeg_kit.dart';
-import 'package:ffmpeg_kit_flutter_new/return_code.dart';
 
 // NOTE: `NativeService` was used in the original file (NativeService.start /
 // NativeService.stop) but was never imported anywhere, which is a compile
@@ -279,17 +277,23 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
       followLinks: false,
       recursive: true,
     )) {
-      print("Entity: ${entity.path}");
-      print("Type: ${entity.runtimeType}");
-
       if (entity is! File) continue;
 
-      final dotIndex = entity.path.lastIndexOf('.');
-      final ext = dotIndex == -1
-          ? "NO EXTENSION"
-          : entity.path.substring(dotIndex + 1);
+      final fileName = entity.uri.pathSegments.last;
 
-      print("Extension: $ext");
+      // Ignore temporary upload files
+      if (fileName.startsWith('af_')) {
+        continue;
+      }
+
+      final dotIndex = fileName.lastIndexOf('.');
+      if (dotIndex == -1) continue;
+
+      final extension = fileName.substring(dotIndex + 1).toLowerCase();
+
+      if (!_kAllowedExtensions.contains(extension)) {
+        continue;
+      }
 
       matchingFiles.add(entity);
     }
@@ -486,50 +490,76 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
   }
 
   // -- to mp3 convertional functions
-  Future<File?> convertToMp3(File input) async {
-    final output = input.path.replaceAll(RegExp(r'\.\w+$'), '.mp3');
 
-    final session = await FFmpegKit.execute(
-      '-y -i "${input.path}" -codec:a libmp3lame -qscale:a 2 "$output"',
-    );
+  Future<File?> prepareUploadFile(File input) async {
+    try {
+      final output = File(
+        '${input.parent.path}/af_${DateTime.now().millisecondsSinceEpoch}.mp3',
+      );
 
-    final rc = await session.getReturnCode();
-
-    if (ReturnCode.isSuccess(rc)) {
-      return File(output);
+      await input.copy(output.path);
+      return output;
+    } catch (e) {
+      debugPrint("Prepare upload file error: $e");
+      return null;
     }
-
-    print(await session.getAllLogsAsString());
-
-    return null;
   }
-
   // ── Upload logic ──────────────────────────────────────────────────────────
+
   Future<void> uploadToServer(RecordingEntry entry) async {
     setState(() => entry.uploadStatus = UploadStatus.uploading);
 
-    final mp3 = await convertToMp3(entry.file);
+    debugPrint("========================================");
+    debugPrint("Starting upload");
+    debugPrint("Original File: ${entry.file.path}");
+
+    final mp3 = await prepareUploadFile(entry.file);
 
     if (mp3 == null) {
+      debugPrint("MP3 conversion failed.");
+      debugPrint("========================================");
+
       if (!mounted) return;
       _onUploadFailed(entry);
       return;
     }
 
     try {
+      debugPrint("Converted File : ${mp3.path}");
+      debugPrint("Converted Size : ${await mp3.length()} bytes");
+
+      debugPrint("Uploading...");
+
       final success = await UploadService.uploadRecording(mp3);
+
+      debugPrint("Upload Result : $success");
 
       if (!mounted) return;
 
       if (success) {
+        debugPrint("Upload SUCCESS");
         _onUploadSucceeded(entry);
       } else {
+        debugPrint("Upload FAILED");
+        _onUploadFailed(entry);
+      }
+    } catch (e, s) {
+      debugPrint("Upload Exception");
+      debugPrint(e.toString());
+      debugPrint(s.toString());
+
+      if (mounted) {
         _onUploadFailed(entry);
       }
     } finally {
       if (await mp3.exists()) {
+        debugPrint("Deleting temp MP3: ${mp3.path}");
         await mp3.delete();
+        debugPrint("Temp file deleted.");
       }
+
+      debugPrint("Upload process finished.");
+      debugPrint("========================================");
     }
   }
 
@@ -642,6 +672,10 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
   Widget _buildRecordingCard(RecordingEntry entry) {
     final file = entry.file;
     final name = file.uri.pathSegments.last;
+    if (!file.existsSync()) {
+      return const SizedBox.shrink();
+    }
+
     final sizeMb = (file.lengthSync() / 1024 / 1024).toStringAsFixed(2);
 
     return Container(

@@ -46,7 +46,6 @@ dependencies:
   firebase_core: ^4.11.0
   firebase_database: ^12.4.4
   cloud_firestore: ^6.6.0
-  ffmpeg_kit_flutter_new: ^3.0.0
 
 dev_dependencies:
   flutter_test:
