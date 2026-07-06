@@ -14,9 +14,9 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import java.io.File
 import java.text.SimpleDateFormat
+import java.util.Collections
 import java.util.Date
 import java.util.Locale
-import java.util.Collections
 
 class CallVaultService : Service() {
 
@@ -26,39 +26,27 @@ class CallVaultService : Service() {
     }
 
     private lateinit var watchPath: String
-    
 
-    // JSON stored in app storage
     private val jsonFile by lazy {
         File(filesDir, "callvault_recordings.json")
     }
 
+    private val processedFiles =
+        Collections.synchronizedSet(mutableSetOf<String>())
 
-private val processedFiles =
-    Collections.synchronizedSet(mutableSetOf<String>())
-
-private val allowedExtensions = setOf(
-    "mp3",
-    "m4a",
-    "aac",
-    "wav",
-    "amr",
-    "3gp",
-    "ogg"
-)
+    private val allowedExtensions = setOf(
+        "mp3", "m4a", "aac", "wav", "amr", "3gp", "ogg"
+    )
 
     private lateinit var observer: FileObserver
-
     private val handler = Handler(Looper.getMainLooper())
 
     override fun onCreate() {
         super.onCreate()
 
-        log("====================================")
         log("Service Created")
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 "CallVault Monitoring",
@@ -75,17 +63,11 @@ private val allowedExtensions = setOf(
         flags: Int,
         startId: Int
     ): Int {
-
         watchPath = intent?.getStringExtra("watchPath") ?: run {
-
-            log("No watch path received.")
+            log("No watch path received")
             stopSelf()
-
             return START_NOT_STICKY
         }
-
-log("Service Started")
-        log("Watch Path = $watchPath")
 
         val notification: Notification =
             NotificationCompat.Builder(this, CHANNEL_ID)
@@ -97,7 +79,8 @@ log("Service Started")
 
         startForeground(1, notification)
 
-        log("Foreground Started")
+        log("Foreground started")
+        log("Watch Path = $watchPath")
 
         startWatching()
 
@@ -105,183 +88,137 @@ log("Service Started")
     }
 
     private fun startWatching() {
-
         val folder = File(watchPath)
 
-        log("------------------------------------")
-        log("Watching Folder")
-        log(folder.absolutePath)
-        log("Folder Exists = ${folder.exists()}")
+        log("Watching folder: ${folder.absolutePath}")
+        log("Folder exists: ${folder.exists()}")
 
-        if (!folder.exists()) {
+        if (!folder.exists()) return
 
-            log("Folder does NOT exist")
+        val existing = folder.listFiles() ?: emptyArray()
 
-            return
+        existing.forEach {
+            if (it.isFile) {
+                processedFiles.add(it.absolutePath)
+                log("Ignoring existing: ${it.name}")
+            }
         }
-
-       val existing = folder.listFiles() ?: emptyArray()
-
-log("Existing Files = ${existing.size}")
-
-existing.forEach {
-    if (it.isFile) {
-        processedFiles.add(it.absolutePath)
-        log("Ignoring existing -> ${it.name}")
-    }
-}
 
         if (::observer.isInitialized) {
             observer.stopWatching()
         }
 
         observer = object : FileObserver(
-    watchPath,
-    CREATE or CLOSE_WRITE or MOVED_TO
-) {
+            watchPath,
+            CREATE or CLOSE_WRITE or MOVED_TO
+        ) {
+            override fun onEvent(event: Int, path: String?) {
+                if (path == null) return
 
-    override fun onEvent(event: Int, path: String?) {
+                val fullPath = "$watchPath/$path"
 
-        if (path == null) return
-
-        val fullPath = "$watchPath/$path"
-
-        when (event and ALL_EVENTS) {
-
-            CREATE -> {
-                log("------------------------------------")
-                log("CREATE")
-                log(fullPath)
+                if ((event and CLOSE_WRITE) == CLOSE_WRITE ||
+                    (event and MOVED_TO) == MOVED_TO
+                ) {
+                    handleNewFile(fullPath)
+                }
             }
-
-            MOVED_TO -> {
-                log("------------------------------------")
-                log("MOVED_TO")
-                log(fullPath)
-            }
-
-            CLOSE_WRITE -> {
-
-    log("------------------------------------")
-    log("CLOSE_WRITE")
-    log(fullPath)
-
-    if (processedFiles.contains(fullPath)) {
-        log("Already processed")
-        return
-    }
-
-    processedFiles.add(fullPath)
-
-    handler.postDelayed({
-
-        Thread {
-            processRecording(fullPath)
-        }.start()
-
-    }, 3000)
-}
         }
-    }
-}
-
 
         observer.startWatching()
-
-        log("FileObserver Started")
+        log("FileObserver started")
     }
 
-private fun processRecording(fullPath: String) {
+    private fun handleNewFile(fullPath: String) {
+        if (processedFiles.contains(fullPath)) {
+            log("Already processing: $fullPath")
+            return
+        }
 
-    val recording = File(fullPath)
+        processedFiles.add(fullPath)
 
-    if (!recording.exists()) {
-
-        log("Recording not found")
-
-        processedFiles.remove(fullPath)
-
-        return
+        handler.postDelayed({
+            Thread {
+                processRecording(fullPath)
+            }.start()
+        }, 3000)
     }
 
-    val extension =
-        recording.extension.lowercase()
+    private fun processRecording(fullPath: String) {
+        val recording = File(fullPath)
 
-    if (extension !in allowedExtensions) {
+        try {
+            if (!recording.exists()) {
+                log("Recording not found")
+                return
+            }
 
-    log("Ignored non-audio file")
+            val extension = recording.extension.lowercase()
 
-    processedFiles.remove(fullPath)
+            if (extension !in allowedExtensions) {
+                log("Ignored non-audio file: ${recording.name}")
+                return
+            }
 
-    return
-}
+            if (!waitUntilStable(recording)) {
+                log("Recording still growing: ${recording.name}")
+                return
+            }
 
-    var stable = false
+            log("Recording completed")
+            log("Original: ${recording.absolutePath}")
+            log("Size: ${recording.length()} bytes")
 
-for (i in 0 until 5) {
+val uploadFile = recording
 
-    val before = recording.length()
+            log("Upload file: ${uploadFile.absolutePath}")
+            log("Upload size: ${uploadFile.length()} bytes")
 
-    Thread.sleep(1000)
+            RecordingStore.saveRecording(jsonFile, uploadFile)
 
-    val after = recording.length()
+            if (RecordingStore.isUploaded(jsonFile, uploadFile.absolutePath)) {
+                log("Already uploaded")
+                // deleteTempIfNeeded(uploadFile, recording)
+                return
+            }
 
-    if (before == after) {
-        stable = true
-        break
+            UploadManager.upload(
+                this,
+                uploadFile,
+                jsonFile
+            )
+
+            // deleteTempIfNeeded(uploadFile, recording)
+
+            log("UploadManager finished")
+
+        } catch (e: Exception) {
+            log("UPLOAD ERROR")
+            log(e.stackTraceToString())
+        } finally {
+            processedFiles.remove(fullPath)
+            log("Process finished")
+        }
     }
-}
 
-if (!stable) {
-    log("Recording still growing")
-    processedFiles.remove(fullPath)
-    return
-}
+    private fun waitUntilStable(file: File): Boolean {
+        repeat(5) {
+            val before = file.length()
+            Thread.sleep(1000)
+            val after = file.length()
 
-    log("====================================")
-    log("Recording Completed")
-    log("Name : ${recording.name}")
-    log("Path : ${recording.absolutePath}")
-    log("Size : ${recording.length()} bytes")
+            if (before == after && after > 0L) {
+                return true
+            }
+        }
 
-    try {
+        return false
+    }
 
-    RecordingStore.saveRecording(
-        jsonFile,
-        recording
-    )
-
-    log("Saved metadata")
-    if (RecordingStore.isUploaded(jsonFile, recording.absolutePath)) {
-    log("Already uploaded")
-    processedFiles.remove(fullPath)
-    return
-}
-   
-
-    UploadManager.upload(
-    this,
-    recording,
-    jsonFile
-)
-
-    log("UploadManager finished")
-
-    processedFiles.remove(fullPath)
-
-} catch (e: Exception) {
-
-    log("UPLOAD ERROR")
-    log(e.stackTraceToString())
-
-    processedFiles.remove(fullPath)
-}
-    log("====================================")
-}
+    
 
     override fun onDestroy() {
-
-        log("Service Destroyed")
+        log("Service destroyed")
 
         if (::observer.isInitialized) {
             observer.stopWatching()
@@ -295,28 +232,25 @@ if (!stable) {
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun log(message: String) {
+        Log.d(TAG, message)
 
-    Log.d(TAG, message)
+        try {
+            val file = File(
+                getExternalFilesDir(null),
+                "callvault_log.txt"
+            )
 
-    try {
+            if (!file.exists()) {
+                file.createNewFile()
+            }
 
-        val file = File(
-            getExternalFilesDir(null),
-            "callvault_log.txt"
-        )
+            val time = SimpleDateFormat(
+                "yyyy-MM-dd HH:mm:ss",
+                Locale.getDefault()
+            ).format(Date())
 
-        if (!file.exists()) {
-            file.createNewFile()
+            file.appendText("$time | $message\n")
+        } catch (_: Exception) {
         }
-
-        val time = SimpleDateFormat(
-            "yyyy-MM-dd HH:mm:ss",
-            Locale.getDefault()
-        ).format(Date())
-
-        file.appendText("$time | $message\n")
-
-    } catch (_: Exception) {
     }
-}
 }
