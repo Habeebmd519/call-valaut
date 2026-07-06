@@ -11,6 +11,8 @@ import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:ffmpeg_kit_flutter_new/ffmpeg_kit.dart';
+import 'package:ffmpeg_kit_flutter_new/return_code.dart';
 
 // NOTE: `NativeService` was used in the original file (NativeService.start /
 // NativeService.stop) but was never imported anywhere, which is a compile
@@ -483,18 +485,51 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
     _startWatching(path);
   }
 
+  // -- to mp3 convertional functions
+  Future<File?> convertToMp3(File input) async {
+    final output = input.path.replaceAll(RegExp(r'\.\w+$'), '.mp3');
+
+    final session = await FFmpegKit.execute(
+      '-y -i "${input.path}" -codec:a libmp3lame -qscale:a 2 "$output"',
+    );
+
+    final rc = await session.getReturnCode();
+
+    if (ReturnCode.isSuccess(rc)) {
+      return File(output);
+    }
+
+    print(await session.getAllLogsAsString());
+
+    return null;
+  }
+
   // ── Upload logic ──────────────────────────────────────────────────────────
   Future<void> uploadToServer(RecordingEntry entry) async {
     setState(() => entry.uploadStatus = UploadStatus.uploading);
 
-    final success = await UploadService.uploadRecording(entry.file);
+    final mp3 = await convertToMp3(entry.file);
 
-    if (!mounted) return;
-
-    if (success) {
-      _onUploadSucceeded(entry);
-    } else {
+    if (mp3 == null) {
+      if (!mounted) return;
       _onUploadFailed(entry);
+      return;
+    }
+
+    try {
+      final success = await UploadService.uploadRecording(mp3);
+
+      if (!mounted) return;
+
+      if (success) {
+        _onUploadSucceeded(entry);
+      } else {
+        _onUploadFailed(entry);
+      }
+    } finally {
+      if (await mp3.exists()) {
+        await mp3.delete();
+      }
     }
   }
 
