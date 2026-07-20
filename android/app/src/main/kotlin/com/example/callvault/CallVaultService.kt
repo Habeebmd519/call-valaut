@@ -145,61 +145,85 @@ class CallVaultService : Service() {
     }
 
     private fun processRecording(fullPath: String) {
-        val recording = File(fullPath)
+    val recording = File(fullPath)
+    var uploadFile: File? = null
 
-        try {
-            if (!recording.exists()) {
-                log("Recording not found")
-                return
-            }
-
-            val extension = recording.extension.lowercase()
-
-            if (extension !in allowedExtensions) {
-                log("Ignored non-audio file: ${recording.name}")
-                return
-            }
-
-            if (!waitUntilStable(recording)) {
-                log("Recording still growing: ${recording.name}")
-                return
-            }
-
-            log("Recording completed")
-            log("Original: ${recording.absolutePath}")
-            log("Size: ${recording.length()} bytes")
-
-val uploadFile = recording
-
-            log("Upload file: ${uploadFile.absolutePath}")
-            log("Upload size: ${uploadFile.length()} bytes")
-
-            RecordingStore.saveRecording(jsonFile, uploadFile)
-
-            if (RecordingStore.isUploaded(jsonFile, uploadFile.absolutePath)) {
-                log("Already uploaded")
-                // deleteTempIfNeeded(uploadFile, recording)
-                return
-            }
-
-            UploadManager.upload(
-                this,
-                uploadFile,
-                jsonFile
-            )
-
-            // deleteTempIfNeeded(uploadFile, recording)
-
-            log("UploadManager finished")
-
-        } catch (e: Exception) {
-            log("UPLOAD ERROR")
-            log(e.stackTraceToString())
-        } finally {
-            processedFiles.remove(fullPath)
-            log("Process finished")
+    try {
+        if (!recording.exists()) {
+            log("Recording not found")
+            return
         }
+
+        val extension = recording.extension.lowercase()
+
+        if (extension !in allowedExtensions) {
+            log("Ignored non-audio file: ${recording.name}")
+            return
+        }
+
+        if (!waitUntilStable(recording)) {
+            log("Recording still growing: ${recording.name}")
+            return
+        }
+
+        log("Recording completed")
+        log("Original: ${recording.absolutePath}")
+        log("Size: ${recording.length()} bytes")
+
+        RecordingStore.saveRecording(jsonFile, recording)
+
+        if (RecordingStore.isUploaded(jsonFile, recording.absolutePath)) {
+            log("Already uploaded")
+            return
+        }
+
+        uploadFile = createTempMp3Copy(recording)
+
+        log("Upload file: ${uploadFile.absolutePath}")
+        log("Upload size: ${uploadFile.length()} bytes")
+
+       val success = UploadManager.upload(
+    this,
+    uploadFile
+)
+
+if (success) {
+    RecordingStore.markUploaded(
+        jsonFile,
+        recording.absolutePath
+    )
+}
+
+        log("UploadManager finished")
+
+    } catch (e: Exception) {
+        log("UPLOAD ERROR")
+        log(e.stackTraceToString())
+    } finally {
+        if (uploadFile != null && uploadFile.exists()) {
+            uploadFile.delete()
+            log("Temp MP3 deleted")
+        }
+
+        processedFiles.remove(fullPath)
+        log("Process finished")
     }
+}
+
+private fun createTempMp3Copy(original: File): File {
+    val tempFile = File(
+        cacheDir,
+        "af_${System.currentTimeMillis()}.mp3"
+    )
+
+    original.copyTo(tempFile, overwrite = true)
+
+    log("Temp MP3 copy created")
+    log("Temp: ${tempFile.absolutePath}")
+    log("Temp size: ${tempFile.length()} bytes")
+
+    return tempFile
+}
 
     private fun waitUntilStable(file: File): Boolean {
         repeat(5) {

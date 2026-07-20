@@ -12,14 +12,12 @@ import java.io.File
 object UploadManager {
 
     private const val TAG = "CALLVAULT"
-
     private val client = OkHttpClient()
 
     fun upload(
         context: Context,
-        recording: File,
-        jsonFile: File
-    ) {
+        recording: File
+    ): Boolean {
 
         val prefs = context.getSharedPreferences(
             "FlutterSharedPreferences",
@@ -31,8 +29,7 @@ object UploadManager {
             "https://n8n-642200590.kloudbeansite.com/webhook/call-upload"
         )!!
 
-        try {
-
+        return try {
             Log.d(TAG, "Webhook = $webhook")
 
             val body = MultipartBody.Builder()
@@ -41,7 +38,7 @@ object UploadManager {
                     "file",
                     recording.name,
                     recording.asRequestBody(
-                        "audio/*".toMediaTypeOrNull()
+                        "audio/mpeg".toMediaTypeOrNull()
                     )
                 )
                 .build()
@@ -52,26 +49,20 @@ object UploadManager {
                 .build()
 
             val response = client.newCall(request).execute()
+            val success = response.isSuccessful
 
-            if (response.isSuccessful) {
-
+            if (success) {
                 Log.d(TAG, "Upload Success")
-
-                RecordingStore.markUploaded(
-                    jsonFile,
-                    recording.absolutePath
-                )
-
             } else {
-
                 Log.d(TAG, "Upload Failed : ${response.code}")
             }
 
             response.close()
+            success
 
         } catch (e: Exception) {
-
             Log.e(TAG, "Upload Error", e)
+            false
         }
     }
 }

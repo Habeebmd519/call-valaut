@@ -115,6 +115,16 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
         "https://n8n-642200590.kloudbeansite.com/webhook/call-upload";
   }
 
+  Future<void> saveMonitoringState(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool("monitoring_started", value);
+  }
+
+  Future<bool> getMonitoringState() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool("monitoring_started") ?? false;
+  }
+
   Future<void> _showServerDialog() async {
     final controller = TextEditingController(text: await getServerUrl());
 
@@ -408,38 +418,94 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
   Future<void> initialize() async {
     setState(() => loading = true);
 
+    await Permission.notification.request();
+    await Permission.audio.request();
+    await Permission.storage.request();
+    await Permission.manageExternalStorage.request();
+
     final prefs = await SharedPreferences.getInstance();
+
+    final savedStarted = prefs.getBool("monitoring_started") ?? false;
     final savedPath = prefs.getString("recording_folder");
 
     if (savedPath != null && await Directory(savedPath).exists()) {
       watchPath = savedPath;
+
       final entries = await _scanFolder(savedPath);
 
       if (!mounted) return;
+
       setState(() {
         allRecordings = entries;
         _recordingsByPath
           ..clear()
           ..addEntries(entries.map((e) => MapEntry(e.file.path, e)));
+
         uploadedRecordings = entries
             .where((e) => e.uploadStatus == UploadStatus.done)
             .toList();
       });
 
       _startWatching(savedPath);
+
+      if (savedStarted) {
+        await NativeService.start(savedPath);
+
+        if (!mounted) return;
+
+        setState(() {
+          started = true;
+        });
+      }
     } else {
       watchPath = null;
+
       if (savedPath != null) {
         await prefs.remove("recording_folder");
       }
+
+      if (!mounted) return;
+
+      setState(() {
+        started = false;
+      });
+
+      await saveMonitoringState(false);
     }
 
     if (!mounted) return;
-    setState(() => loading = false);
 
-    if (watchPath == null && mounted) {
+    setState(() {
+      loading = false;
+    });
+
+    if (watchPath == null) {
       pickFolder();
     }
+  }
+
+  Future<void> _startMonitoring() async {
+    await Permission.notification.request();
+    await Permission.audio.request();
+    await Permission.storage.request();
+
+    if (watchPath == null) {
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Recording folder not found")),
+      );
+      return;
+    }
+
+    await NativeService.start(watchPath!);
+    await saveMonitoringState(true);
+
+    if (!mounted) return;
+
+    setState(() {
+      started = true;
+    });
   }
 
   Future<void> pickFolder() async {
@@ -918,33 +984,37 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
   // Split out of the inline closures in _buildHeader for readability/testability.
   Future<void> _stopMonitoring() async {
     await NativeService.stop();
+    await saveMonitoringState(false);
 
     if (!mounted) return;
-    setState(() => started = false);
+
+    setState(() {
+      started = false;
+    });
 
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(const SnackBar(content: Text("Monitoring stopped")));
   }
 
-  Future<void> _startMonitoring() async {
-    await Permission.notification.request();
-    await Permission.audio.request();
-    await Permission.storage.request();
+  // Future<void> _startMonitoring() async {
+  //   await Permission.notification.request();
+  //   await Permission.audio.request();
+  //   await Permission.storage.request();
 
-    if (watchPath == null) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Recording folder not found")),
-      );
-      return;
-    }
+  //   if (watchPath == null) {
+  //     if (!mounted) return;
+  //     ScaffoldMessenger.of(context).showSnackBar(
+  //       const SnackBar(content: Text("Recording folder not found")),
+  //     );
+  //     return;
+  //   }
 
-    await NativeService.start(watchPath!);
+  //   await NativeService.start(watchPath!);
 
-    if (!mounted) return;
-    setState(() => started = true);
-  }
+  //   if (!mounted) return;
+  //   setState(() => started = true);
+  // }
 
   Widget _actionButton({
     required String label,
