@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:callvault/core/helper_function/helper_function.dart';
+import 'package:callvault/featurs/client_management/pressntation/screen/client_management_page.dart';
 
 import 'package:callvault/screens/licence_screen.dart';
 import 'package:callvault/screens/recording_details_page.dart';
@@ -90,7 +91,10 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
   late TabController _tabController;
   late AnimationController _pulseController;
   late Animation<double> _pulseAnimation;
+  late final TextEditingController _serverController;
+  late final TextEditingController _clientNameController;
 
+  String clientName = 'Unknown client';
   // REMOVED: `pathController` (a TextEditingController) was declared and
   // disposed but never actually used anywhere in the widget tree — dead code.
 
@@ -104,7 +108,26 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
   static const Color textSecondary = Color(0xFF94A3B8);
   static const Color divider = Color(0xFF243456);
 
+  // ---- client-name persistenc mothed
+
+  Future<void> saveClientName(String name) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('client_name', name.trim());
+  }
+
+  Future<String> getClientName() async {
+    final prefs = await SharedPreferences.getInstance();
+
+    final savedName = prefs.getString('client_name')?.trim();
+
+    if (savedName == null || savedName.isEmpty) {
+      return 'Unknown client';
+    }
+
+    return savedName;
+  }
   // ── Server URL persistence ──────────────────────────────────────────────
+
   Future<void> saveServerUrl(String url) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString("server_url", url);
@@ -127,57 +150,63 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
     return prefs.getBool("monitoring_started") ?? false;
   }
 
+  //---- show server dialog
   Future<void> _showServerDialog() async {
-    final controller = TextEditingController(text: await getServerUrl());
+    _serverController.text = await getServerUrl();
 
     if (!mounted) return;
 
     await showDialog(
       context: context,
-      builder: (_) => AlertDialog(
-        title: const Text("Server URL"),
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Server URL'),
         content: TextField(
-          controller: controller,
+          controller: _serverController,
+          keyboardType: TextInputType.url,
           decoration: const InputDecoration(
-            hintText: "https://your-server/webhook",
+            hintText: 'https://your-server/webhook',
           ),
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text("Cancel"),
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Cancel'),
           ),
           ElevatedButton(
             onPressed: () async {
-              final newUrl = controller.text.trim();
+              final newUrl = _serverController.text.trim();
+
+              if (newUrl.isEmpty) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Please enter a server URL')),
+                );
+                return;
+              }
 
               await saveServerUrl(newUrl);
 
-              debugPrint("✅ Server URL updated successfully");
-              debugPrint("New URL: $newUrl");
-
-              // Optional: Verify it was actually saved
               final savedUrl = await getServerUrl();
-              debugPrint("Saved URL from SharedPreferences: $savedUrl");
+
+              debugPrint('✅ Server URL updated successfully');
+              debugPrint('New URL: $newUrl');
+              debugPrint('Saved URL: $savedUrl');
 
               if (!mounted) return;
 
-              Navigator.pop(context);
+              Navigator.pop(dialogContext);
 
               ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text("Server URL updated")),
+                const SnackBar(content: Text('Server URL updated')),
               );
             },
-            child: const Text("Save"),
+            child: const Text('Save'),
           ),
         ],
       ),
     );
-
-    // FIX: `controller` is a local TextEditingController that was never
-    // disposed in the original code (small leak each time the dialog opens).
-    // controller.dispose();
   }
+
+  // -- show client name dialog
 
   Future<void> migrateActivationV2() async {
     final prefs = await SharedPreferences.getInstance();
@@ -308,10 +337,26 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
     );
   }
 
+  /// --- load client name
+  Future<void> _loadClientName() async {
+    final savedName = await getClientName();
+
+    if (!mounted) return;
+
+    setState(() {
+      clientName = savedName;
+    });
+
+    debugPrint('Loaded client name: $savedName');
+  }
+
   // ── Lifecycle ─────────────────────────────────────────────────────────────
   @override
   void initState() {
     super.initState();
+
+    _serverController = TextEditingController();
+    _clientNameController = TextEditingController();
 
     _tabController = TabController(length: 2, vsync: this);
 
@@ -324,18 +369,20 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
       CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
     );
 
+    _loadClientName();
     checkLicense();
   }
 
   @override
   void dispose() {
-    // FIX: cancel the debounce timer too, not just the stream subscription —
-    // otherwise a pending Timer could fire after the State is disposed and
-    // call setState on a dead widget.
+    _serverController.dispose();
+    _clientNameController.dispose();
+
     _debounceTimer?.cancel();
     _watcher?.cancel();
     _tabController.dispose();
     _pulseController.dispose();
+
     super.dispose();
   }
 
@@ -1281,10 +1328,29 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
           ),
         ],
       ),
-      floatingActionButton: FloatingActionButton(
-        backgroundColor: Colors.black,
-        onPressed: _showServerDialog,
-        child: const Icon(Icons.settings),
+      floatingActionButton: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          FloatingActionButton(
+            heroTag: 'client_name_button',
+            backgroundColor: Colors.black,
+            onPressed: () {
+              Navigator.push(
+                context,
+
+                MaterialPageRoute(builder: (_) => const ClientManagementPage()),
+              );
+            },
+            child: const Icon(Icons.person_add_alt_1),
+          ),
+          const SizedBox(height: 12),
+          FloatingActionButton(
+            heroTag: 'server_url_button',
+            backgroundColor: Colors.black,
+            onPressed: _showServerDialog,
+            child: const Icon(Icons.settings),
+          ),
+        ],
       ),
     );
   }

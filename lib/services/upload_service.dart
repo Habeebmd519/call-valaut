@@ -7,6 +7,16 @@ import 'package:http_parser/http_parser.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class UploadService {
+  static String _safeValue(String? value, {required String placeholder}) {
+    final cleaned = value?.trim() ?? '';
+
+    if (cleaned.isEmpty || cleaned.toLowerCase() == 'unknown') {
+      return placeholder;
+    }
+
+    return cleaned;
+  }
+
   static Future<bool> uploadRecording(
     File file, {
     required RecordingMetadata metadata,
@@ -46,33 +56,52 @@ class UploadService {
           break;
       }
 
-      request.fields.addAll({
-        'filename': metadata.filename,
-        'phone_number': metadata.phoneNumber,
-        'contact_name': metadata.contactName,
-        'call_date': metadata.callDate,
-        'call_time': metadata.callTime,
-      });
+      final filename = _safeValue(
+        metadata.filename,
+        placeholder: file.uri.pathSegments.last,
+      );
+
+      final fields = <String, String>{
+        'filename': filename,
+        'phone_number': _safeValue(
+          metadata.phoneNumber,
+          placeholder: 'Not available',
+        ),
+        'contact_name': _safeValue(
+          metadata.contactName,
+          placeholder: 'Unknown contact',
+        ),
+        'call_date': _safeValue(
+          metadata.callDate,
+          placeholder: 'Not available',
+        ),
+        'call_time': _safeValue(
+          metadata.callTime,
+          placeholder: 'Not available',
+        ),
+      };
+
+      request.fields.addAll(fields);
 
       request.files.add(
         await http.MultipartFile.fromPath(
           'file',
           file.path,
-          filename: metadata.filename,
+          filename: filename,
           contentType: MediaType.parse(mime),
         ),
       );
+
+      debugPrint('Uploading to: $webhookUrl');
+      debugPrint('Fields being sent: $fields');
+      debugPrint('File field: file');
+      debugPrint('File path: ${file.path}');
+      debugPrint('MIME type: $mime');
 
       final response = await request.send().timeout(const Duration(minutes: 3));
 
       final body = await response.stream.bytesToString();
 
-      debugPrint('Uploading to: $webhookUrl');
-      debugPrint('Filename: ${metadata.filename}');
-      debugPrint('Phone: ${metadata.phoneNumber}');
-      debugPrint('Contact: ${metadata.contactName}');
-      debugPrint('Date: ${metadata.callDate}');
-      debugPrint('Time: ${metadata.callTime}');
       debugPrint('Status: ${response.statusCode}');
       debugPrint('Response: $body');
 
