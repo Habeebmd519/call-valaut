@@ -1,36 +1,73 @@
-import 'dart:convert';
+// import 'package:android_intent_plus/android_intent.dart';
+// import 'package:flutter/foundation.dart';
+// import 'package:flutter/services.dart';
+// import 'package:permission_handler/permission_handler.dart';
 
-import 'package:callvault/featurs/call_recording/models/call_recording.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+// void openBatteryOptimization() {
+//   const intent = AndroidIntent(
+//     action: 'android.settings.IGNORE_BATTERY_OPTIMIZATION_SETTINGS',
+//   );
 
-class LocalStorage {
-  static const String key = "recordings";
+//   intent.launch();
+// }
 
-  static Future<void> save(CallRecording recording) async {
-    final prefs = await SharedPreferences.getInstance();
+// Future<void> openAutoStartSettings() async {
+//   const intent = AndroidIntent(action: 'miui.intent.action.OP_AUTO_START');
 
-    final list = prefs.getStringList(key) ?? [];
+//   try {
+//     await intent.launch();
+//   } catch (e) {
+//     debugPrint('Could not open auto-start settings: $e');
+//   }
+// }
 
-    list.add(jsonEncode(recording.toJson()));
+// class NativeService {
+//   static const MethodChannel channel = MethodChannel('callvault/service');
 
-    await prefs.setStringList(key, list);
-  }
+//   static Future<void> start(String watchPath) async {
+//     await channel.invokeMethod<void>('startService', {'watchPath': watchPath});
+//   }
 
-  static Future<List<CallRecording>> load() async {
-    final prefs = await SharedPreferences.getInstance();
+//   static Future<void> stop() async {
+//     await channel.invokeMethod<void>('stopService');
+//   }
 
-    final list = prefs.getStringList(key) ?? [];
+//   static Future<String?> lookupContactName(String phoneNumber) async {
+//     final number = phoneNumber.trim();
 
-    return list
-        .map((e) => CallRecording.fromJson(jsonDecode(e)))
-        .toList()
-        .reversed
-        .toList();
-  }
+//     if (number.isEmpty) {
+//       return null;
+//     }
 
-  static Future<void> clear() async {
-    final prefs = await SharedPreferences.getInstance();
+//     var permission = await Permission.contacts.status;
 
-    await prefs.remove(key);
-  }
-}
+//     if (!permission.isGranted) {
+//       permission = await Permission.contacts.request();
+//     }
+
+//     if (!permission.isGranted) {
+//       debugPrint('Contacts permission was not granted');
+//       return null;
+//     }
+
+//     try {
+//       final name = await channel.invokeMethod<String>('lookupContactName', {
+//         'phoneNumber': number,
+//       });
+
+//       final cleanName = name?.trim();
+
+//       if (cleanName == null || cleanName.isEmpty) {
+//         return null;
+//       }
+
+//       return cleanName;
+//     } on PlatformException catch (e) {
+//       debugPrint('Contact lookup failed: ${e.code} - ${e.message}');
+//       return null;
+//     } catch (e) {
+//       debugPrint('Contact lookup failed: $e');
+//       return null;
+//     }
+//   }
+// }

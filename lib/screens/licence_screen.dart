@@ -52,7 +52,7 @@ class _ActivationPageState extends State<ActivationPage> {
 
       if (enteredKey == serverKey) {
         final prefs = await SharedPreferences.getInstance();
-        await prefs.setBool("activated", true);
+        await prefs.setBool('activatedV2', true);
 
         if (!mounted) return;
 

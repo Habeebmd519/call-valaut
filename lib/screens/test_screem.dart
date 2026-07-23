@@ -3,9 +3,12 @@ import 'dart:io';
 
 import 'package:callvault/core/helper_function/helper_function.dart';
 
-import 'package:callvault/featurs/upload/upload_service.dart';
 import 'package:callvault/screens/licence_screen.dart';
 import 'package:callvault/screens/recording_details_page.dart';
+import 'package:callvault/services/contact_service.dart';
+import 'package:callvault/services/local_contact_service.dart';
+import 'package:callvault/services/metadata_service.dart';
+import 'package:callvault/services/upload_service.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -30,7 +33,6 @@ enum UploadStatus { idle, uploading, done, failed }
 class RecordingEntry {
   final File file;
   UploadStatus uploadStatus;
-
   RecordingEntry({required this.file, this.uploadStatus = UploadStatus.idle});
 }
 
@@ -147,9 +149,19 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
           ),
           ElevatedButton(
             onPressed: () async {
-              await saveServerUrl(controller.text.trim());
+              final newUrl = controller.text.trim();
+
+              await saveServerUrl(newUrl);
+
+              debugPrint("✅ Server URL updated successfully");
+              debugPrint("New URL: $newUrl");
+
+              // Optional: Verify it was actually saved
+              final savedUrl = await getServerUrl();
+              debugPrint("Saved URL from SharedPreferences: $savedUrl");
 
               if (!mounted) return;
+
               Navigator.pop(context);
 
               ScaffoldMessenger.of(context).showSnackBar(
@@ -164,57 +176,136 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
 
     // FIX: `controller` is a local TextEditingController that was never
     // disposed in the original code (small leak each time the dialog opens).
-    controller.dispose();
+    // controller.dispose();
+  }
+
+  Future<void> migrateActivationV2() async {
+    final prefs = await SharedPreferences.getInstance();
+
+    const migrationKey = 'activation_v2_trial_reset_completed_v2';
+
+    final completed = prefs.getBool(migrationKey) ?? false;
+
+    debugPrint('Trial reset migration completed: $completed');
+    debugPrint('Old first_open: ${prefs.getInt('first_open')}');
+
+    if (completed) {
+      return;
+    }
+
+    final now = DateTime.now().millisecondsSinceEpoch;
+
+    await prefs.remove('activated');
+    await prefs.setBool('activatedV2', false);
+    await prefs.setInt('first_open', now);
+    await prefs.setBool(migrationKey, true);
+
+    debugPrint('New first_open: ${prefs.getInt('first_open')}');
+    debugPrint('V2 trial reset completed');
   }
 
   // ── License check ─────────────────────────────────────────────────────────
   Future<void> checkLicense() async {
+    await migrateActivationV2();
+
+    // if (!prefs.containsKey('first_open')) {
+    //   await prefs.setInt('first_open', DateTime.now().millisecondsSinceEpoch);
+    // }
+
+    // final firstOpen = prefs.getInt('first_open')!;
+
     final prefs = await SharedPreferences.getInstance();
 
-    if (!prefs.containsKey("first_open")) {
-      await prefs.setInt("first_open", DateTime.now().millisecondsSinceEpoch);
+    if (!prefs.containsKey('first_open')) {
+      await prefs.setInt('first_open', DateTime.now().millisecondsSinceEpoch);
     }
 
-    final firstOpen = prefs.getInt("first_open")!;
-    final activated = prefs.getBool("activated") ?? false;
+    final firstOpenMilliseconds = prefs.getInt('first_open');
 
-    final doc = await FirebaseFirestore.instance
-        .collection("app_config")
-        .doc("app_config")
-        .get();
-
-    // REMOVED: the original code had several `print` statements here
-    // (document keys, key lengths, trial_days value/type) left over from
-    // debugging. They didn't affect behavior, just noise — stripped out.
-    if (!doc.exists) {
-      initialize();
+    if (firstOpenMilliseconds == null) {
+      await _openActivationPage();
       return;
     }
 
-    final data = doc.data()!;
+    try {
+      final doc = await FirebaseFirestore.instance
+          .collection('app_config')
+          .doc('app_config')
+          .get();
 
-    final enabled = data["Enabled"] as bool? ?? true;
-    final trialDays = int.tryParse(data["trial_days"].toString()) ?? 7;
+      // For a paid app, do not silently unlock when configuration is missing.
+      if (!doc.exists) {
+        debugPrint('Firestore app configuration does not exist');
+        await _openActivationPage();
+        return;
+      }
 
-    if (!enabled) {
-      await prefs.remove("activated");
-    }
+      final data = doc.data();
 
-    final daysUsed = DateTime.now()
-        .difference(DateTime.fromMillisecondsSinceEpoch(firstOpen))
-        .inDays;
+      if (data == null) {
+        await _openActivationPage();
+        return;
+      }
 
-    if (daysUsed >= trialDays && !activated) {
-      if (!mounted) return;
+      final enabled = data['Enabled'] as bool? ?? false;
 
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (_) => const ActivationPage()),
+      final trialDays = int.tryParse(data['trial_days']?.toString() ?? '') ?? 7;
+
+      if (!enabled) {
+        await prefs.setBool('activatedV2', false);
+      }
+
+      final firstOpen = DateTime.fromMillisecondsSinceEpoch(
+        firstOpenMilliseconds,
       );
-      return;
-    }
 
-    initialize();
+      final daysUsed = DateTime.now().difference(firstOpen).inDays;
+
+      final activatedV2 = prefs.getBool('activatedV2') ?? false;
+
+      debugPrint('Enabled: $enabled');
+      debugPrint('Trial days: $trialDays');
+      debugPrint('Days used: $daysUsed');
+      debugPrint('Activated V2: $activatedV2');
+
+      if (!enabled || (daysUsed >= trialDays && !activatedV2)) {
+        await _openActivationPage();
+        return;
+      }
+
+      await initialize();
+    } on FirebaseException catch (e, stackTrace) {
+      debugPrint('Firestore error: ${e.code} - ${e.message}');
+      debugPrintStack(stackTrace: stackTrace);
+
+      // Decide whether an already activated customer may use the app offline.
+      final activatedV2 = prefs.getBool('activatedV2') ?? false;
+
+      if (activatedV2) {
+        await initialize();
+      } else {
+        await _openActivationPage();
+      }
+    } catch (e, stackTrace) {
+      debugPrint('License check failed: $e');
+      debugPrintStack(stackTrace: stackTrace);
+
+      final activatedV2 = prefs.getBool('activatedV2') ?? false;
+
+      if (activatedV2) {
+        await initialize();
+      } else {
+        await _openActivationPage();
+      }
+    }
+  }
+
+  Future<void> _openActivationPage() async {
+    if (!mounted) return;
+
+    Navigator.of(context).pushReplacement(
+      MaterialPageRoute(builder: (_) => const ActivationPage()),
+    );
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -566,66 +657,72 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
       await input.copy(output.path);
       return output;
     } catch (e) {
-      debugPrint("Prepare upload file error: $e");
+      debugPrint('Prepare upload file error: $e');
       return null;
     }
   }
   // ── Upload logic ──────────────────────────────────────────────────────────
 
   Future<void> uploadToServer(RecordingEntry entry) async {
-    setState(() => entry.uploadStatus = UploadStatus.uploading);
-
-    debugPrint("========================================");
-    debugPrint("Starting upload");
-    debugPrint("Original File: ${entry.file.path}");
-
-    final mp3 = await prepareUploadFile(entry.file);
-
-    if (mp3 == null) {
-      debugPrint("MP3 conversion failed.");
-      debugPrint("========================================");
-
-      if (!mounted) return;
-      _onUploadFailed(entry);
+    if (entry.uploadStatus == UploadStatus.uploading) {
       return;
     }
 
+    setState(() {
+      entry.uploadStatus = UploadStatus.uploading;
+    });
+
+    File? uploadFile;
+
     try {
-      debugPrint("Converted File : ${mp3.path}");
-      debugPrint("Converted Size : ${await mp3.length()} bytes");
+      final metadata = await MetadataService.fromFile(entry.file);
 
-      debugPrint("Uploading...");
+      String contactName = 'Unknown';
 
-      final success = await UploadService.uploadRecording(mp3);
+      if (metadata.phoneNumber.isNotEmpty &&
+          metadata.phoneNumber != 'Unknown') {
+        contactName =
+            await LocalContactService.findByNumber(metadata.phoneNumber) ??
+            await ContactService.findByNumber(metadata.phoneNumber) ??
+            'Unknown';
+      }
 
-      debugPrint("Upload Result : $success");
+      final completedMetadata = metadata.copyWith(contactName: contactName);
+
+      uploadFile = await prepareUploadFile(entry.file);
+
+      if (uploadFile == null) {
+        if (mounted) {
+          _onUploadFailed(entry);
+        }
+        return;
+      }
+
+      final success = await UploadService.uploadRecording(
+        uploadFile,
+        metadata: completedMetadata.copyWith(
+          filename: uploadFile.uri.pathSegments.last,
+        ),
+      );
 
       if (!mounted) return;
 
       if (success) {
-        debugPrint("Upload SUCCESS");
         _onUploadSucceeded(entry);
       } else {
-        debugPrint("Upload FAILED");
         _onUploadFailed(entry);
       }
-    } catch (e, s) {
-      debugPrint("Upload Exception");
-      debugPrint(e.toString());
-      debugPrint(s.toString());
+    } catch (e, stackTrace) {
+      debugPrint('Upload exception: $e');
+      debugPrintStack(stackTrace: stackTrace);
 
       if (mounted) {
         _onUploadFailed(entry);
       }
     } finally {
-      if (await mp3.exists()) {
-        debugPrint("Deleting temp MP3: ${mp3.path}");
-        await mp3.delete();
-        debugPrint("Temp file deleted.");
+      if (uploadFile != null && await uploadFile.exists()) {
+        await uploadFile.delete();
       }
-
-      debugPrint("Upload process finished.");
-      debugPrint("========================================");
     }
   }
 
