@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:callvault/featurs/client_management/model/client_model.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter/foundation.dart';
 
 class ClientStorageService {
   static const String _storageKey = 'saved_clients';
@@ -68,13 +69,27 @@ class ClientStorageService {
   }
 
   static Future<ClientModel?> findByPhoneNumber(String phoneNumber) async {
-    final normalizedInput = normalizePhoneNumber(phoneNumber);
     final clients = await getClients();
 
-    for (final client in clients) {
-      final normalizedSaved = normalizePhoneNumber(client.phoneNumber);
+    final input = normalizePhoneNumber(phoneNumber);
 
-      if (normalizedSaved == normalizedInput) {
+    if (input.isEmpty) return null;
+
+    // Use the last 10 digits if available.
+    final inputKey = input.length > 10
+        ? input.substring(input.length - 10)
+        : input;
+
+    for (final client in clients) {
+      final saved = normalizePhoneNumber(client.phoneNumber);
+
+      final savedKey = saved.length > 10
+          ? saved.substring(saved.length - 10)
+          : saved;
+
+      debugPrint('Comparing: $inputKey <-> $savedKey');
+
+      if (savedKey == inputKey) {
         return client;
       }
     }

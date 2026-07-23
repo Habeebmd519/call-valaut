@@ -19,9 +19,24 @@ class UploadService {
 
   static Future<bool> uploadRecording(
     File file, {
+
     required RecordingMetadata metadata,
+
+    required String clientName,
   }) async {
     try {
+      debugPrint('UploadService received metadata:');
+
+      debugPrint('filename: ${metadata.filename}');
+
+      debugPrint('phoneNumber: ${metadata.phoneNumber}');
+
+      debugPrint('contactName: ${metadata.contactName}');
+      debugPrint('clientName: $clientName');
+
+      debugPrint('callDate: ${metadata.callDate}');
+
+      debugPrint('callTime: ${metadata.callTime}');
       final prefs = await SharedPreferences.getInstance();
 
       final webhookUrl =
@@ -71,6 +86,7 @@ class UploadService {
           metadata.contactName,
           placeholder: 'Unknown contact',
         ),
+        'client_name': _safeValue(clientName, placeholder: 'Unknown client'),
         'call_date': _safeValue(
           metadata.callDate,
           placeholder: 'Not available',
@@ -80,7 +96,6 @@ class UploadService {
           placeholder: 'Not available',
         ),
       };
-
       request.fields.addAll(fields);
 
       request.files.add(
@@ -97,6 +112,10 @@ class UploadService {
       debugPrint('File field: file');
       debugPrint('File path: ${file.path}');
       debugPrint('MIME type: $mime');
+      debugPrint('Fields being sent:');
+      fields.forEach((key, value) {
+        debugPrint('$key = $value');
+      });
 
       final response = await request.send().timeout(const Duration(minutes: 3));
 

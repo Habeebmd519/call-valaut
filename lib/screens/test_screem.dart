@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:callvault/core/helper_function/helper_function.dart';
 import 'package:callvault/featurs/client_management/pressntation/screen/client_management_page.dart';
+import 'package:callvault/featurs/client_management/service/client_storage_service.dart';
 
 import 'package:callvault/screens/licence_screen.dart';
 import 'package:callvault/screens/recording_details_page.dart';
@@ -15,6 +16,7 @@ import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:path_provider/path_provider.dart';
 
 // NOTE: `NativeService` was used in the original file (NativeService.start /
 // NativeService.stop) but was never imported anywhere, which is a compile
@@ -533,6 +535,7 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
     await Permission.audio.request();
     await Permission.storage.request();
     await Permission.manageExternalStorage.request();
+    await Permission.contacts.request();
 
     final prefs = await SharedPreferences.getInstance();
 
@@ -669,8 +672,13 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
 
   Future<File?> prepareUploadFile(File input) async {
     try {
+      final cacheDirectory = await getTemporaryDirectory();
+
+      final extension = input.path.split('.').last.toLowerCase();
+
       final output = File(
-        '${input.parent.path}/af_${DateTime.now().millisecondsSinceEpoch}.mp3',
+        '${cacheDirectory.path}/'
+        'af_${DateTime.now().millisecondsSinceEpoch}.$extension',
       );
 
       await input.copy(output.path);
@@ -694,19 +702,50 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
     File? uploadFile;
 
     try {
+      debugPrint("Original filename: ${entry.file.uri.pathSegments.last}");
+      // Read metadata from the original recording.
       final metadata = await MetadataService.fromFile(entry.file);
 
-      String contactName = 'Unknown';
+      final phoneNumber = metadata.phoneNumber.trim();
 
-      if (metadata.phoneNumber.isNotEmpty &&
-          metadata.phoneNumber != 'Unknown') {
-        contactName =
-            await LocalContactService.findByNumber(metadata.phoneNumber) ??
-            await ContactService.findByNumber(metadata.phoneNumber) ??
-            'Unknown';
+      debugPrint('Original recording: ${entry.file.path}');
+      debugPrint('Phone number: $phoneNumber');
+      debugPrint('Filename contact: ${metadata.contactName}');
+      debugPrint('Date: ${metadata.callDate}');
+      debugPrint('Time: ${metadata.callTime}');
+
+      // Resolve phone contact name.
+      var resolvedContactName = metadata.contactName.trim();
+
+      if (phoneNumber.isNotEmpty &&
+          phoneNumber.toLowerCase() != 'unknown' &&
+          phoneNumber.toLowerCase() != 'not available') {
+        resolvedContactName =
+            await LocalContactService.findByNumber(phoneNumber) ??
+            await ContactService.findByNumber(phoneNumber) ??
+            resolvedContactName;
       }
 
-      final completedMetadata = metadata.copyWith(contactName: contactName);
+      if (resolvedContactName.isEmpty) {
+        resolvedContactName = 'Unknown contact';
+      }
+
+      // Find the locally saved client for this phone number.
+      final savedClient = await ClientStorageService.findByPhoneNumber(
+        phoneNumber,
+      );
+
+      final resolvedClientName =
+          savedClient?.clientName.trim().isNotEmpty == true
+          ? savedClient!.clientName.trim()
+          : 'Unknown client';
+
+      debugPrint('Resolved contact name: $resolvedContactName');
+      debugPrint('Resolved client name: $resolvedClientName');
+
+      final completedMetadata = metadata.copyWith(
+        contactName: resolvedContactName,
+      );
 
       uploadFile = await prepareUploadFile(entry.file);
 
@@ -717,11 +756,14 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
         return;
       }
 
+      final uploadMetadata = completedMetadata.copyWith(
+        filename: uploadFile.uri.pathSegments.last,
+      );
+
       final success = await UploadService.uploadRecording(
         uploadFile,
-        metadata: completedMetadata.copyWith(
-          filename: uploadFile.uri.pathSegments.last,
-        ),
+        metadata: uploadMetadata,
+        clientName: resolvedClientName,
       );
 
       if (!mounted) return;
@@ -739,8 +781,12 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
         _onUploadFailed(entry);
       }
     } finally {
-      if (uploadFile != null && await uploadFile.exists()) {
-        await uploadFile.delete();
+      try {
+        if (uploadFile != null && await uploadFile.exists()) {
+          await uploadFile.delete();
+        }
+      } catch (e) {
+        debugPrint('Temporary file deletion error: $e');
       }
     }
   }
@@ -754,51 +800,51 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
       }
     });
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        backgroundColor: Color(0xFF10B981),
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.all(Radius.circular(12)),
-        ),
-        content: Row(
-          children: [
-            Icon(Icons.check_circle, color: Colors.white),
-            SizedBox(width: 10),
-            Expanded(
-              child: Text(
-                "Recording uploaded successfully",
-                style: TextStyle(color: Colors.white),
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        const SnackBar(
+          backgroundColor: Color(0xFF10B981),
+          behavior: SnackBarBehavior.fixed,
+          content: Row(
+            children: [
+              Icon(Icons.check_circle, color: Colors.white),
+              SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Recording uploaded successfully',
+                  style: TextStyle(color: Colors.white),
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
-      ),
-    );
+      );
   }
 
   void _onUploadFailed(RecordingEntry entry) {
     setState(() => entry.uploadStatus = UploadStatus.failed);
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        backgroundColor: Colors.red,
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        content: const Row(
-          children: [
-            Icon(Icons.error, color: Colors.white),
-            SizedBox(width: 10),
-            Expanded(
-              child: Text(
-                "Upload failed",
-                style: TextStyle(color: Colors.white),
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        const SnackBar(
+          backgroundColor: Colors.red,
+          behavior: SnackBarBehavior.fixed,
+          content: Row(
+            children: [
+              Icon(Icons.error, color: Colors.white),
+              SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Upload failed',
+                  style: TextStyle(color: Colors.white),
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
-      ),
-    );
+      );
   }
 
   // ── UI helpers ─────────────────────────────────────────────────────────────
