@@ -21,7 +21,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 // error. It must live somewhere in your project (it isn't defined in this
 // file). Point this import at wherever that class actually is, e.g.:
 // import 'package:callvault/core/native_service/native_service.dart';
-// import 'package:callvault/core/native_service/native_service.dart';
 
 // ---------------------------------------------------------------------------
 // Upload status enum
@@ -69,23 +68,9 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
 
   String? watchPath;
 
-  // FIX: `watcher` was referenced throughout the original file (dispose,
-  // initialize, pickFolder, startWatching) but was never declared as a field
-  // — only left as a commented-out line. That's why the file didn't compile.
-  // It's declared here (private, since nothing outside this State needs it).
   StreamSubscription<FileSystemEvent>? _watcher;
-
-  // FIX: raw filesystem watch events fire multiple times in quick succession
-  // for a single logical change (e.g. a recorder app writing a file in
-  // chunks triggers several `modify` events). Debouncing collapses bursts of
-  // events into a single rescan, which matters a lot once there are
-  // hundreds/thousands of files to re-read.
   Timer? _debounceTimer;
 
-  // FIX: keep recordings in a path -> entry map instead of scanning a List
-  // with `firstWhere` on every refresh. Lookups become O(1) instead of O(n),
-  // which is the main win for large folders (avoids the original code's
-  // effectively O(n^2) rebuild on every fs event).
   final Map<String, RecordingEntry> _recordingsByPath = {};
 
   late TabController _tabController;
@@ -94,21 +79,26 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
   late final TextEditingController _serverController;
   late final TextEditingController _clientNameController;
 
+  // NEW: expandable FAB (speed-dial) state + animation.
+  bool _fabOpen = false;
+  late AnimationController _fabController;
+  late Animation<double> _fabRotation;
+  late Animation<double> _fabScale;
+
   String clientName = 'Unknown client';
-  // REMOVED: `pathController` (a TextEditingController) was declared and
-  // disposed but never actually used anywhere in the widget tree — dead code.
 
   // ── Theme colours ─────────────────────────────────────────────────────────
   static const Color bg = Color(0xFF0F1729);
   static const Color cardBg = Color(0xFF1A2744);
   static const Color accent = Color(0xFF3B82F6);
+  static const Color accent2 = Color(0xFF6366F1);
   static const Color success = Color(0xFF10B981);
   static const Color amber = Color(0xFFF59E0B);
   static const Color textPrimary = Color(0xFFF8FAFC);
   static const Color textSecondary = Color(0xFF94A3B8);
   static const Color divider = Color(0xFF243456);
 
-  // ---- client-name persistenc mothed
+  // ---- client-name persistence ----
 
   Future<void> saveClientName(String name) async {
     final prefs = await SharedPreferences.getInstance();
@@ -159,20 +149,42 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
     await showDialog(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: const Text('Server URL'),
+        backgroundColor: cardBg,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text(
+          'Server URL',
+          style: TextStyle(color: textPrimary, fontWeight: FontWeight.w700),
+        ),
         content: TextField(
           controller: _serverController,
           keyboardType: TextInputType.url,
-          decoration: const InputDecoration(
+          style: const TextStyle(color: textPrimary),
+          cursorColor: accent,
+          decoration: InputDecoration(
             hintText: 'https://your-server/webhook',
+            hintStyle: const TextStyle(color: textSecondary),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: const BorderSide(color: divider),
+            ),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: const BorderSide(color: accent),
+            ),
           ),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogContext),
-            child: const Text('Cancel'),
+            child: const Text('Cancel', style: TextStyle(color: textSecondary)),
           ),
           ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: accent,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
+              ),
+            ),
             onPressed: () async {
               final newUrl = _serverController.text.trim();
 
@@ -206,7 +218,7 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
     );
   }
 
-  // -- show client name dialog
+  // -- activation / license migration --
 
   Future<void> migrateActivationV2() async {
     final prefs = await SharedPreferences.getInstance();
@@ -236,12 +248,6 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
   // ── License check ─────────────────────────────────────────────────────────
   Future<void> checkLicense() async {
     await migrateActivationV2();
-
-    // if (!prefs.containsKey('first_open')) {
-    //   await prefs.setInt('first_open', DateTime.now().millisecondsSinceEpoch);
-    // }
-
-    // final firstOpen = prefs.getInt('first_open')!;
 
     final prefs = await SharedPreferences.getInstance();
 
@@ -307,7 +313,6 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
       debugPrint('Firestore error: ${e.code} - ${e.message}');
       debugPrintStack(stackTrace: stackTrace);
 
-      // Decide whether an already activated customer may use the app offline.
       final activatedV2 = prefs.getBool('activatedV2') ?? false;
 
       if (activatedV2) {
@@ -369,6 +374,25 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
       CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
     );
 
+    // NEW: drives the FAB rotation (+  -> x) and the mini-FAB reveal.
+    _fabController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 260),
+    );
+
+    _fabRotation =
+        Tween<double>(
+          begin: 0,
+          end: 0.125, // 45°
+        ).animate(
+          CurvedAnimation(parent: _fabController, curve: Curves.easeOutBack),
+        );
+
+    _fabScale = CurvedAnimation(
+      parent: _fabController,
+      curve: Curves.easeOutBack,
+    );
+
     _loadClientName();
     checkLicense();
   }
@@ -382,35 +406,12 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
     _watcher?.cancel();
     _tabController.dispose();
     _pulseController.dispose();
+    _fabController.dispose();
 
     super.dispose();
   }
 
   // ── Folder scanning ────────────────────────────────────────────────────────
-  // Pure disk read: returns a fresh, sorted list of RecordingEntry for the
-  // given folder. Does NOT touch State/setState — keeps this method testable
-  // and reusable, and keeps I/O off the widget lifecycle.
-  // Future<List<RecordingEntry>> _scanFolder(String path) async {
-  //   final dir = Directory(path);
-
-  //   print("Exists = ${await dir.exists()}");
-
-  //   try {
-  //     final list = dir.listSync();
-
-  //     print("Count = ${list.length}");
-
-  //     for (final e in list) {
-  //       print(e.path);
-  //     }
-  //   } catch (e, s) {
-  //     print(e);
-  //     print(s);
-  //   }
-
-  //   return [];
-  // }
-
   Future<List<RecordingEntry>> _scanFolder(String path) async {
     final directory = Directory(path);
     print("Scanning folder: $path");
@@ -445,33 +446,15 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
 
       matchingFiles.add(entity);
     }
-    // await for (final entity in directory.list(followLinks: false)) {
-    //   print("Found: ${entity.path}");
-    //   if (entity is! File) continue;
-
-    //   final dotIndex = entity.path.lastIndexOf('.');
-    //   // FIX: original code did `entity.path.split('.').last`, which throws
-    //   // on a file with no extension at all. Guard against that instead.
-    //   if (dotIndex == -1) continue;
-
-    //   final extension = entity.path.substring(dotIndex + 1).toLowerCase();
-    //   if (!_kAllowedExtensions.contains(extension)) continue;
-
-    //   matchingFiles.add(entity);
-    // }
 
     // FIX: fetch `lastModified` for all files in parallel instead of
-    // sequentially awaiting inside a for-loop. This is the main performance
-    // win for folders with hundreds/thousands of recordings — I/O is
-    // overlapped instead of serialized.
+    // sequentially awaiting inside a for-loop.
     final modifiedTimes = await Future.wait(
       matchingFiles.map((f) => f.lastModified()),
     );
 
     // FIX: reuse existing RecordingEntry objects (via the path map) so an
-    // in-progress/finished upload status survives a rescan, instead of the
-    // original's `firstWhere(... orElse: () => RecordingEntry(...))` pattern
-    // which was O(n) per file (O(n^2) overall) and still worked, but slowly.
+    // in-progress/finished upload status survives a rescan.
     final entries = <RecordingEntry>[];
     for (var i = 0; i < matchingFiles.length; i++) {
       final file = matchingFiles[i];
@@ -487,10 +470,6 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
     return [for (final i in indices) entries[i]];
   }
 
-  // Re-scans the folder and applies the result to State, but only calls
-  // setState if something actually changed (added/removed/reordered file).
-  // This satisfies "avoid calling setState() unnecessarily" while still
-  // guaranteeing the list reflects disk changes immediately.
   Future<void> _refreshRecordings(String path) async {
     final freshEntries = await _scanFolder(path);
 
@@ -507,15 +486,12 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
         ).every((same) => same);
 
     if (unchanged) {
-      // Nothing added, removed, or reordered — skip the rebuild entirely.
       return;
     }
 
     setState(() {
       allRecordings = freshEntries;
 
-      // Rebuild the lookup map (prevents stale entries for deleted files,
-      // and guarantees no duplicate keys/entries).
       _recordingsByPath
         ..clear()
         ..addEntries(freshEntries.map((e) => MapEntry(e.file.path, e)));
@@ -528,15 +504,12 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
 
   // ── Folder watching ────────────────────────────────────────────────────────
   void _startWatching(String path) {
-    // Guard against duplicate listeners (e.g. if this is ever called twice
-    // for the same path without an intervening stop).
     _stopWatching();
 
     final directory = Directory(path);
     if (!directory.existsSync()) return;
 
     _watcher = directory.watch().listen((event) {
-      // Debounce: collapse rapid bursts of fs events into one rescan.
       _debounceTimer?.cancel();
       _debounceTimer = Timer(const Duration(milliseconds: 300), () {
         if (!mounted) return;
@@ -660,7 +633,6 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
       return;
     }
 
-    // Stop watching the old folder before switching.
     _stopWatching();
 
     setState(() {
@@ -693,7 +665,7 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
     _startWatching(path);
   }
 
-  // -- to mp3 convertional functions
+  // -- upload preparation --
 
   Future<File?> prepareUploadFile(File input) async {
     try {
@@ -913,13 +885,12 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
             child: Row(
               children: [
-                // Icon
                 Container(
                   width: 44,
                   height: 44,
                   decoration: BoxDecoration(
                     gradient: const LinearGradient(
-                      colors: [Color(0xFF3B82F6), Color(0xFF6366F1)],
+                      colors: [accent, accent2],
                       begin: Alignment.topLeft,
                       end: Alignment.bottomRight,
                     ),
@@ -934,7 +905,6 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
 
                 const SizedBox(width: 14),
 
-                // Name + size
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -961,12 +931,10 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
                   ),
                 ),
 
-                // Upload button
                 _buildUploadButton(entry),
 
                 const SizedBox(width: 8),
 
-                // Chevron
                 const Icon(Icons.chevron_right, color: textSecondary, size: 18),
               ],
             ),
@@ -982,13 +950,26 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
     }
 
     if (items.isEmpty) {
-      return Center(child: Text(emptyMsg));
+      return Padding(
+        padding: const EdgeInsets.only(top: 60),
+        child: Column(
+          children: [
+            Icon(
+              Icons.inbox_outlined,
+              color: textSecondary.withOpacity(0.6),
+              size: 40,
+            ),
+            const SizedBox(height: 12),
+            Text(
+              emptyMsg,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: textSecondary, fontSize: 13),
+            ),
+          ],
+        ),
+      );
     }
 
-    // FIX: use ListView.builder with a stable key per item (see
-    // _buildRecordingCard's ValueKey above) so Flutter can efficiently diff
-    // the list instead of rebuilding every card from scratch — this matters
-    // once there are hundreds/thousands of recordings.
     return ListView.builder(
       shrinkWrap: true,
       physics: const NeverScrollableScrollPhysics(),
@@ -1005,11 +986,17 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
         color: cardBg,
         borderRadius: BorderRadius.circular(20),
         border: Border.all(color: divider),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.18),
+            blurRadius: 16,
+            offset: const Offset(0, 8),
+          ),
+        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Status row
           Row(
             children: [
               AnimatedBuilder(
@@ -1052,7 +1039,6 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
 
           const SizedBox(height: 18),
 
-          // Folder row
           Row(
             children: [
               const Icon(Icons.folder_outlined, color: textSecondary, size: 16),
@@ -1098,7 +1084,6 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
 
           const SizedBox(height: 20),
 
-          // Action buttons
           Row(
             children: [
               Expanded(
@@ -1125,7 +1110,6 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
     );
   }
 
-  // Split out of the inline closures in _buildHeader for readability/testability.
   Future<void> _stopMonitoring() async {
     await NativeService.stop();
     await saveMonitoringState(false);
@@ -1140,25 +1124,6 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
       context,
     ).showSnackBar(const SnackBar(content: Text("Monitoring stopped")));
   }
-
-  // Future<void> _startMonitoring() async {
-  //   await Permission.notification.request();
-  //   await Permission.audio.request();
-  //   await Permission.storage.request();
-
-  //   if (watchPath == null) {
-  //     if (!mounted) return;
-  //     ScaffoldMessenger.of(context).showSnackBar(
-  //       const SnackBar(content: Text("Recording folder not found")),
-  //     );
-  //     return;
-  //   }
-
-  //   await NativeService.start(watchPath!);
-
-  //   if (!mounted) return;
-  //   setState(() => started = true);
-  // }
 
   Widget _actionButton({
     required String label,
@@ -1198,6 +1163,198 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
     );
   }
 
+  // ── Expandable FAB (speed dial) ────────────────────────────────────────────
+  void _toggleFab() {
+    setState(() {
+      _fabOpen = !_fabOpen;
+      _fabOpen ? _fabController.forward() : _fabController.reverse();
+    });
+  }
+
+  void _closeFab() {
+    if (!_fabOpen) return;
+    setState(() {
+      _fabOpen = false;
+      _fabController.reverse();
+    });
+  }
+
+  // Full-screen dimming barrier shown behind the open speed-dial so a tap
+  // anywhere outside the menu closes it — also visually separates the menu
+  // from the recording list beneath it.
+  Widget _buildFabBarrier() {
+    return IgnorePointer(
+      ignoring: !_fabOpen,
+      child: GestureDetector(
+        onTap: _closeFab,
+        behavior: HitTestBehavior.opaque,
+        child: AnimatedOpacity(
+          opacity: _fabOpen ? 1 : 0,
+          duration: const Duration(milliseconds: 200),
+          child: Container(color: Colors.black.withOpacity(0.45)),
+        ),
+      ),
+    );
+  }
+
+  // A single labelled mini-action in the speed dial: a text chip + a round
+  // icon button, both fading/scaling in with a slight stagger.
+  Widget _buildSpeedDialItem({
+    required IconData icon,
+    required String label,
+    required Color color,
+    required VoidCallback onTap,
+    required double delay,
+  }) {
+    final curved = CurvedAnimation(
+      parent: _fabController,
+      curve: Interval(delay, 1.0, curve: Curves.easeOutBack),
+    );
+
+    return AnimatedBuilder(
+      animation: curved,
+      builder: (_, child) => Transform.scale(
+        scale: curved.value,
+        alignment: Alignment.centerRight,
+        child: Opacity(opacity: curved.value.clamp(0.0, 1.0), child: child),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: 16),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                color: cardBg,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: divider),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.25),
+                    blurRadius: 8,
+                    offset: const Offset(0, 3),
+                  ),
+                ],
+              ),
+              child: Text(
+                label,
+                style: const TextStyle(
+                  color: textPrimary,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Material(
+              color: color,
+              shape: const CircleBorder(),
+              elevation: 4,
+              child: InkWell(
+                customBorder: const CircleBorder(),
+                onTap: () {
+                  _closeFab();
+                  onTap();
+                },
+                child: SizedBox(
+                  width: 48,
+                  height: 48,
+                  child: Icon(icon, color: Colors.white, size: 22),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildExpandableFab() {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        _buildSpeedDialItem(
+          icon: Icons.person_add_alt_1,
+          label: "Client",
+          color: accent2,
+          delay: 0.05,
+          onTap: () {
+            Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const ClientManagementPage()),
+            );
+          },
+        ),
+        _buildSpeedDialItem(
+          icon: Icons.settings_outlined,
+          label: "Server",
+          color: amber,
+          delay: 0.0,
+          onTap: _showServerDialog,
+        ),
+
+        // Main toggle button — rotates + and gains a subtle gradient glow.
+        Material(
+          color: Colors.transparent,
+          shape: const CircleBorder(),
+          // child: Ink(
+          //   decoration: BoxDecoration(
+          //     shape: BoxShape.circle,
+          //     gradient: const LinearGradient(
+          //       colors: [accent, accent2],
+          //       begin: Alignment.topLeft,
+          //       end: Alignment.bottomRight,
+          //     ),
+          //     boxShadow: [
+          //       BoxShadow(
+          //         color: accent.withOpacity(0.45),
+          //         blurRadius: 16,
+          //         spreadRadius: 1,
+          //         offset: const Offset(0, 6),
+          //       ),
+          //     ],
+          //   ),
+          child: Container(
+            width: 50,
+            height: 50,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              gradient: const LinearGradient(
+                colors: [accent, accent2],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: accent.withOpacity(0.45),
+                  blurRadius: 16,
+                  spreadRadius: 1,
+                  offset: const Offset(0, 6),
+                ),
+              ],
+            ),
+
+            child: InkWell(
+              customBorder: const CircleBorder(),
+              onTap: _toggleFab,
+              child: SizedBox(
+                width: 60,
+                height: 60,
+                child: RotationTransition(
+                  turns: _fabRotation,
+                  child: const Icon(Icons.add, color: Colors.white, size: 28),
+                ),
+              ),
+            ),
+          ),
+          // ),
+        ),
+      ],
+    );
+  }
+
   // ── Build ─────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
@@ -1215,9 +1372,7 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
               width: 28,
               height: 28,
               decoration: BoxDecoration(
-                gradient: const LinearGradient(
-                  colors: [Color(0xFF3B82F6), Color(0xFF6366F1)],
-                ),
+                gradient: const LinearGradient(colors: [accent, accent2]),
                 borderRadius: BorderRadius.circular(8),
               ),
               child: const Icon(
@@ -1240,118 +1395,99 @@ class _TestPageState extends State<TestPage> with TickerProviderStateMixin {
         ),
       ),
 
-      body: Column(
+      // Stack lets the dimming barrier + speed-dial float above the page
+      // content without changing how the rest of the layout works.
+      body: Stack(
         children: [
-          // ── Static header ────────────────────────────────────────────────
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-            child: _buildHeader(),
-          ),
-
-          const SizedBox(height: 16),
-
-          // ── Tabs ─────────────────────────────────────────────────────────
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: Container(
-              decoration: BoxDecoration(
-                color: cardBg,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: divider),
+          Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                child: _buildHeader(),
               ),
-              child: TabBar(
-                controller: _tabController,
-                indicator: BoxDecoration(
-                  color: accent,
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                indicatorSize: TabBarIndicatorSize.tab,
-                dividerColor: Colors.transparent,
-                labelColor: Colors.white,
-                unselectedLabelColor: textSecondary,
-                labelStyle: const TextStyle(
-                  fontWeight: FontWeight.w600,
-                  fontSize: 13,
-                ),
-                tabs: [
-                  Tab(
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        const Icon(Icons.list_alt, size: 16),
-                        const SizedBox(width: 6),
-                        Text("All (${allRecordings.length})"),
-                      ],
-                    ),
+
+              const SizedBox(height: 16),
+
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: cardBg,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: divider),
                   ),
-                  Tab(
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        const Icon(Icons.cloud_done_outlined, size: 16),
-                        const SizedBox(width: 6),
-                        Text("Uploaded (${uploadedRecordings.length})"),
-                      ],
+                  child: TabBar(
+                    controller: _tabController,
+                    indicator: BoxDecoration(
+                      color: accent,
+                      borderRadius: BorderRadius.circular(10),
                     ),
+                    indicatorSize: TabBarIndicatorSize.tab,
+                    dividerColor: Colors.transparent,
+                    labelColor: Colors.white,
+                    unselectedLabelColor: textSecondary,
+                    labelStyle: const TextStyle(
+                      fontWeight: FontWeight.w600,
+                      fontSize: 13,
+                    ),
+                    tabs: [
+                      Tab(
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            const Icon(Icons.list_alt, size: 16),
+                            const SizedBox(width: 6),
+                            Text("All (${allRecordings.length})"),
+                          ],
+                        ),
+                      ),
+                      Tab(
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            const Icon(Icons.cloud_done_outlined, size: 16),
+                            const SizedBox(width: 6),
+                            Text("Uploaded (${uploadedRecordings.length})"),
+                          ],
+                        ),
+                      ),
+                    ],
                   ),
-                ],
+                ),
               ),
-            ),
+
+              const SizedBox(height: 12),
+
+              Expanded(
+                child: TabBarView(
+                  controller: _tabController,
+                  children: [
+                    SingleChildScrollView(
+                      padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
+                      child: _buildRecordingList(
+                        allRecordings,
+                        "No recordings found.\nTap 'Change' to set your recording folder.",
+                      ),
+                    ),
+                    SingleChildScrollView(
+                      padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
+                      child: _buildRecordingList(
+                        uploadedRecordings,
+                        "No uploads yet.\nTap the cloud icon on any recording to upload.",
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ),
 
-          const SizedBox(height: 12),
-
-          // ── Tab content ───────────────────────────────────────────────────
-          Expanded(
-            child: TabBarView(
-              controller: _tabController,
-              children: [
-                // All recordings
-                SingleChildScrollView(
-                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
-                  child: _buildRecordingList(
-                    allRecordings,
-                    "No recordings found.\nTap 'Change' to set your recording folder.",
-                  ),
-                ),
-
-                // Uploaded recordings
-                SingleChildScrollView(
-                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
-                  child: _buildRecordingList(
-                    uploadedRecordings,
-                    "No uploads yet.\nTap the cloud icon on any recording to upload.",
-                  ),
-                ),
-              ],
-            ),
-          ),
+          // Dimming barrier — sits above the content, below the FAB itself.
+          Positioned.fill(child: _buildFabBarrier()),
         ],
       ),
-      floatingActionButton: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          FloatingActionButton(
-            heroTag: 'client_name_button',
-            backgroundColor: Colors.black,
-            onPressed: () {
-              Navigator.push(
-                context,
 
-                MaterialPageRoute(builder: (_) => const ClientManagementPage()),
-              );
-            },
-            child: const Icon(Icons.person_add_alt_1),
-          ),
-          const SizedBox(height: 12),
-          FloatingActionButton(
-            heroTag: 'server_url_button',
-            backgroundColor: Colors.black,
-            onPressed: _showServerDialog,
-            child: const Icon(Icons.settings),
-          ),
-        ],
-      ),
+      floatingActionButton: _buildExpandableFab(),
     );
   }
 }
